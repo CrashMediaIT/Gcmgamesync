@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Crash Crafts Game Sync" Manufacturer="CrashMediaIT" Version="0.1.0" UpgradeCode="11111111-2222-3333-4444-555555555555">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Crash Crafts Game Sync is already installed." />
+    <Feature Id="Main" Title="Crash Crafts Game Sync" Level="1">
+      <ComponentGroupRef Id="AppComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="Crash Crafts Game Sync" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable">
+        <File Source="target/release/crash-crafts-game-sync.exe" KeyPath="yes" />
+        <ServiceInstall Id="CrashCraftsGameSyncService" Name="CrashCraftsGameSync" DisplayName="Crash Crafts Game Sync" Description="Background emulator save synchronization daemon." Type="ownProcess" Start="auto" ErrorControl="normal" Arguments="daemon" />
+        <ServiceControl Id="CrashCraftsGameSyncServiceControl" Name="CrashCraftsGameSync" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

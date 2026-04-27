@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Crash Crafts Game Sync
+Comment=Configure emulator save synchronization and Steam ROM Manager presets
+Exec=crash-crafts-game-sync setup-desktop
+Terminal=true
+Categories=Game;Utility;
+StartupNotify=false

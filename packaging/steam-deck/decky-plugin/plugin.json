@@ -1,0 +1,10 @@
+{
+  "name": "Crash Crafts Game Sync",
+  "author": "CrashMediaIT",
+  "flags": ["debug"],
+  "publish": {
+    "tags": ["emulation", "sync", "saves"],
+    "description": "Game-mode companion for the Rust Crash Crafts Game Sync daemon. Shows daemon status and opens desktop setup while sync remains in the user service.",
+    "image": ""
+  }
+}

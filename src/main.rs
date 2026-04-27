@@ -2,6 +2,7 @@ use base64::{Engine, engine::general_purpose};
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::Sha256;
@@ -71,7 +72,6 @@ fn detect_emulators(root: &Path) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(test)]
 fn should_sync(relative_path: &str, emulator: &Value) -> bool {
     use glob::Pattern;
     let normalized = relative_path.replace('\\', "/");
@@ -85,6 +85,288 @@ fn should_sync(relative_path: &str, emulator: &Value) -> bool {
             .any(|pattern| pattern.matches(&normalized))
     };
     matches("sync_include") && !matches("sync_exclude")
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct DesktopConfig {
+    server_url: String,
+    auth_token: String,
+    rom_roots: Vec<String>,
+    emulator_roots: Vec<String>,
+    sync_roots: Vec<SyncRoot>,
+    srm: SrmConfig,
+    service: ServiceConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SyncRoot {
+    emulator_id: String,
+    path: String,
+    #[serde(default)]
+    emulator_executable: String,
+    remote_prefix: String,
+    pull_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SrmConfig {
+    install: bool,
+    roms_directory: String,
+    steam_directory: String,
+    parsers_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ServiceConfig {
+    install_on_setup: bool,
+    windows_service_name: String,
+    linux_systemd_user_unit: String,
+    steam_deck_decky_plugin: String,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            server_url: "https://sync.example.com".to_owned(),
+            auth_token: String::new(),
+            rom_roots: Vec::new(),
+            emulator_roots: Vec::new(),
+            sync_roots: Vec::new(),
+            srm: SrmConfig {
+                install: true,
+                roms_directory: String::new(),
+                steam_directory: String::new(),
+                parsers_path: "steam-rom-manager/parsers/crash-crafts-game-sync.json".to_owned(),
+            },
+            service: ServiceConfig {
+                install_on_setup: true,
+                windows_service_name: "CrashCraftsGameSync".to_owned(),
+                linux_systemd_user_unit: "crash-crafts-game-sync.service".to_owned(),
+                steam_deck_decky_plugin: "crash-crafts-game-sync-decky".to_owned(),
+            },
+        }
+    }
+}
+
+fn default_desktop_config_path() -> AppResult<PathBuf> {
+    if cfg!(windows) {
+        let base = env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+            })
+            .ok_or("APPDATA or USERPROFILE is required to choose a desktop config path")?;
+        Ok(base
+            .join("CrashCrafts")
+            .join("GameSync")
+            .join("desktop-config.json"))
+    } else {
+        let base = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or("XDG_CONFIG_HOME or HOME is required to choose a desktop config path")?;
+        Ok(base
+            .join("crash-crafts-game-sync")
+            .join("desktop-config.json"))
+    }
+}
+
+fn read_desktop_config(path: &Path) -> AppResult<DesktopConfig> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn write_desktop_config(path: &Path, config: &DesktopConfig) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        secure_create_dir_all(parent)?;
+    }
+    let mut file = fs::File::create(path)?;
+    secure_file(&file)?;
+    file.write_all(&serde_json::to_vec_pretty(config)?)?;
+    Ok(())
+}
+
+fn emulator_by_id(id: &str) -> Option<Value> {
+    manifest()["emulators"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|emulator| emulator["id"].as_str() == Some(id))
+        .cloned()
+}
+
+fn collect_sync_files(root: &Path, emulator: &Value) -> AppResult<Vec<PathBuf>> {
+    fn visit(
+        base: &Path,
+        path: &Path,
+        emulator: &Value,
+        files: &mut Vec<PathBuf>,
+    ) -> AppResult<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(base, &path, emulator, files)?;
+            } else if path.is_file() {
+                let relative = path
+                    .strip_prefix(base)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if should_sync(&relative, emulator) {
+                    files.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    if root.exists() {
+        visit(root, root, emulator, &mut files)?;
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn remote_file_path(prefix: &str, relative: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        relative.trim_start_matches('/').to_owned()
+    } else {
+        format!("{prefix}/{}", relative.trim_start_matches('/'))
+    }
+}
+
+fn upload_sync_file(server: &str, token: &str, remote_path: &str, path: &Path) -> AppResult<Value> {
+    let url = format!(
+        "{}/api/files/{}",
+        server.trim_end_matches('/'),
+        urlencoding::encode(remote_path)
+    );
+    let mut response = ureq::put(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .send(fs::read(path)?)?
+        .into_body();
+    Ok(response.read_json()?)
+}
+
+fn pull_sync_file(
+    server: &str,
+    token: &str,
+    remote_path: &str,
+    destination: &Path,
+) -> AppResult<()> {
+    let url = format!(
+        "{}/api/files/{}",
+        server.trim_end_matches('/'),
+        urlencoding::encode(remote_path)
+    );
+    let mut response = ureq::get(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .call()?
+        .into_body();
+    let bytes = response.read_to_vec()?;
+    if let Some(parent) = destination.parent() {
+        secure_create_dir_all(parent)?;
+    }
+    let mut file = fs::File::create(destination)?;
+    secure_file(&file)?;
+    file.write_all(&bytes)?;
+    Ok(())
+}
+
+fn run_desktop_sync_once(config: &DesktopConfig) -> AppResult<Value> {
+    let server = validate_server_url(&config.server_url)?
+        .trim_end_matches('/')
+        .to_owned();
+    if config.auth_token.trim().is_empty() {
+        return Err("auth_token is required for desktop daemon sync".into());
+    }
+
+    let mut pushed = Vec::new();
+    let mut pulled = Vec::new();
+    let mut errors = Vec::new();
+    for sync_root in &config.sync_roots {
+        let Some(emulator) = emulator_by_id(&sync_root.emulator_id) else {
+            errors.push(json!({"emulator_id": sync_root.emulator_id, "error": "unknown emulator"}));
+            continue;
+        };
+        let root = PathBuf::from(&sync_root.path);
+        for file in collect_sync_files(&root, &emulator)? {
+            let relative = file
+                .strip_prefix(&root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let remote = remote_file_path(&sync_root.remote_prefix, &relative);
+            match upload_sync_file(&server, &config.auth_token, &remote, &file) {
+                Ok(result) => {
+                    pushed.push(json!({"local": file, "remote": remote, "result": result}))
+                }
+                Err(error) => errors
+                    .push(json!({"local": file, "remote": remote, "error": error.to_string()})),
+            }
+        }
+        for pull_path in &sync_root.pull_paths {
+            let safe = match safe_relative_path(pull_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(json!({"remote": pull_path, "error": error.to_string()}));
+                    continue;
+                }
+            };
+            let destination = root.join(&safe);
+            let remote = remote_file_path(&sync_root.remote_prefix, pull_path);
+            match pull_sync_file(&server, &config.auth_token, &remote, &destination) {
+                Ok(()) => pulled.push(json!({"local": destination, "remote": remote})),
+                Err(error) => errors.push(
+                    json!({"local": destination, "remote": remote, "error": error.to_string()}),
+                ),
+            }
+        }
+    }
+
+    Ok(json!({"pushed": pushed, "pulled": pulled, "errors": errors}))
+}
+
+fn srm_parser_presets(config: &DesktopConfig) -> Value {
+    let parsers = config
+        .sync_roots
+        .iter()
+        .filter_map(|sync_root| {
+            let emulator = emulator_by_id(&sync_root.emulator_id)?;
+            Some(json!({
+                "parserType": "Glob",
+                "configTitle": format!("Crash Crafts - {}", emulator["name"].as_str().unwrap_or(&sync_root.emulator_id)),
+                "steamCategory": format!("Crash Crafts/{}", emulator["name"].as_str().unwrap_or(&sync_root.emulator_id)),
+                "romDirectory": if config.srm.roms_directory.is_empty() { &sync_root.path } else { &config.srm.roms_directory },
+                "executable": sync_root.emulator_executable,
+                "requiresExecutableSelection": sync_root.emulator_executable.is_empty(),
+                "startInDirectory": sync_root.path,
+                "titleModifier": "${fuzzyTitle}",
+                "imageProviders": ["SteamGridDB"],
+                "excludedSyncPatterns": emulator["sync_exclude"].clone()
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "generated_by": APP_NAME,
+        "steam_directory": config.srm.steam_directory,
+        "parsers": parsers
+    })
+}
+
+fn write_srm_parsers(config: &DesktopConfig) -> AppResult<PathBuf> {
+    if config.srm.parsers_path.trim().is_empty() {
+        return Err("srm.parsers_path is required".into());
+    }
+    let path = PathBuf::from(&config.srm.parsers_path);
+    if let Some(parent) = path.parent() {
+        secure_create_dir_all(parent)?;
+    }
+    let mut file = fs::File::create(&path)?;
+    secure_file(&file)?;
+    file.write_all(&serde_json::to_vec_pretty(&srm_parser_presets(config))?)?;
+    Ok(path)
 }
 
 #[derive(Clone)]
@@ -921,6 +1203,36 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 )?,
             ))
         }
+        (Method::Get, path) if path.starts_with("/api/files/") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let rel_path =
+                urlencoding::decode(path.trim_start_matches("/api/files/"))?.into_owned();
+            let relative = safe_relative_path(&rel_path)?;
+            let file_path = state
+                .data_dir
+                .join("files")
+                .join(user["email"].as_str().unwrap_or("unknown"))
+                .join(relative);
+            if !file_path.exists() {
+                return Ok(json_response(404, json!({"error": "file not found"})));
+            }
+            Ok(response(
+                200,
+                fs::read(file_path)?,
+                "application/octet-stream",
+            ))
+        }
         _ => Ok(json_response(404, json!({"error": "not found"}))),
     })();
     let response =
@@ -1013,6 +1325,122 @@ fn cmd_healthcheck(args: &[String]) -> AppResult<()> {
     }
 }
 
+fn config_path_from_args(args: &[String]) -> AppResult<PathBuf> {
+    let mut arg_pairs = args.windows(2);
+    arg_pairs
+        .find(|window| window[0] == "--config")
+        .map(|window| PathBuf::from(&window[1]))
+        .map(Ok)
+        .unwrap_or_else(default_desktop_config_path)
+}
+
+fn all_arg_values(args: &[String], name: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|window| window[0] == name)
+        .map(|window| window[1].clone())
+        .collect()
+}
+
+fn cmd_desktop_config(args: &[String]) -> AppResult<()> {
+    let path = config_path_from_args(args)?;
+    let config = if path.exists() {
+        read_desktop_config(&path)?
+    } else {
+        DesktopConfig::default()
+    };
+    println!("{}", serde_json::to_string_pretty(&config)?);
+    Ok(())
+}
+
+fn cmd_setup_desktop(args: &[String]) -> AppResult<()> {
+    let path = config_path_from_args(args)?;
+    let mut config = if path.exists() {
+        read_desktop_config(&path)?
+    } else {
+        DesktopConfig::default()
+    };
+    if let Ok(server) = arg_value(args, "--server") {
+        config.server_url = validate_server_url(&server)?.to_owned();
+    }
+    if let Ok(token) = arg_value(args, "--token") {
+        config.auth_token = token;
+    }
+    let rom_roots = all_arg_values(args, "--rom-root");
+    if !rom_roots.is_empty() {
+        config.rom_roots = rom_roots;
+    }
+    let emulator_roots = all_arg_values(args, "--emulator-root");
+    if !emulator_roots.is_empty() {
+        config.emulator_roots = emulator_roots.clone();
+        config.sync_roots = emulator_roots
+            .iter()
+            .flat_map(|root| detect_emulators(Path::new(root)))
+            .filter_map(|detected| {
+                let emulator_id = detected["id"].as_str()?.to_owned();
+                let path = detected["path"].as_str()?.to_owned();
+                Some(SyncRoot {
+                    remote_prefix: emulator_id.clone(),
+                    emulator_id,
+                    path,
+                    emulator_executable: String::new(),
+                    pull_paths: Vec::new(),
+                })
+            })
+            .collect();
+    }
+    if let Ok(parsers_path) = arg_value(args, "--srm-parsers") {
+        config.srm.parsers_path = parsers_path;
+    }
+    if let Some(first_rom_root) = config.rom_roots.first() {
+        config.srm.roms_directory = first_rom_root.clone();
+    }
+    write_desktop_config(&path, &config)?;
+    let srm_path = if config.srm.install {
+        Some(write_srm_parsers(&config)?)
+    } else {
+        None
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "config_path": path,
+            "service": config.service,
+            "sync_roots": config.sync_roots,
+            "srm_parsers_path": srm_path
+        }))?
+    );
+    Ok(())
+}
+
+fn cmd_daemon(args: &[String]) -> AppResult<()> {
+    let path = config_path_from_args(args)?;
+    let config = read_desktop_config(&path)?;
+    let interval_arg = optional_arg_value(args, "--interval-seconds", "60");
+    let interval_seconds = interval_arg
+        .parse::<u64>()
+        .map_err(|_| "--interval-seconds must be a positive integer")?
+        .max(5);
+    loop {
+        let result = run_desktop_sync_once(&config)?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        if args.iter().any(|arg| arg == "--once") {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval_seconds));
+    }
+}
+
+fn cmd_generate_srm(args: &[String]) -> AppResult<()> {
+    let path = config_path_from_args(args)?;
+    let config = read_desktop_config(&path)?;
+    let output = write_srm_parsers(&config)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({"srm_parsers_path": output}))?
+    );
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!(
         "usage:
@@ -1020,6 +1448,10 @@ fn print_usage() {
    crash-crafts-game-sync manifest
    crash-crafts-game-sync scan --root <path>
    crash-crafts-game-sync status --root <path>
+   crash-crafts-game-sync desktop-config [--config <path>]
+   crash-crafts-game-sync setup-desktop [--config <path>] --server <url> --token <token> [--rom-root <path>] [--emulator-root <path>] [--srm-parsers <path>]
+   crash-crafts-game-sync daemon [--config <path>] [--once] [--interval-seconds 60]
+   crash-crafts-game-sync generate-srm [--config <path>]
    crash-crafts-game-sync upload-log --server <url> --token <token> [--level info] <message>
    crash-crafts-game-sync healthcheck [--url http://127.0.0.1:8080/api/health]"
     );
@@ -1065,6 +1497,10 @@ fn main() -> AppResult<()> {
         }
         "upload-log" => cmd_upload_log(&args),
         "healthcheck" => cmd_healthcheck(&args),
+        "desktop-config" => cmd_desktop_config(&args),
+        "setup-desktop" => cmd_setup_desktop(&args),
+        "daemon" => cmd_daemon(&args),
+        "generate-srm" => cmd_generate_srm(&args),
         _ => {
             print_usage();
             std::process::exit(2);
@@ -1199,5 +1635,72 @@ mod tests {
         assert!(html.contains(APP_NAME));
         assert!(html.contains("First-run setup"));
         assert!(html.contains("Office365"));
+    }
+
+    #[test]
+    fn desktop_config_round_trips_service_and_srm_settings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("desktop-config.json");
+        let config = DesktopConfig {
+            server_url: "https://sync.example.com".to_owned(),
+            rom_roots: vec!["/games/roms".to_owned()],
+            sync_roots: vec![SyncRoot {
+                emulator_id: "duckstation".to_owned(),
+                path: "/games/emulators/DuckStation".to_owned(),
+                emulator_executable: "/games/emulators/DuckStation/duckstation".to_owned(),
+                remote_prefix: "duckstation".to_owned(),
+                pull_paths: vec!["memcards/card.mcd".to_owned()],
+            }],
+            ..Default::default()
+        };
+        write_desktop_config(&path, &config).unwrap();
+        let saved = read_desktop_config(&path).unwrap();
+        assert_eq!(saved.service.windows_service_name, "CrashCraftsGameSync");
+        assert_eq!(saved.sync_roots[0].remote_prefix, "duckstation");
+    }
+
+    #[test]
+    fn sync_collection_respects_manifest_include_and_exclude_rules() {
+        let temp = TempDir::new().unwrap();
+        let duck = temp.path().join("DuckStation");
+        fs::create_dir_all(duck.join("memcards")).unwrap();
+        fs::create_dir_all(duck.join("inputprofiles")).unwrap();
+        fs::write(duck.join("memcards/card.mcd"), b"save").unwrap();
+        fs::write(duck.join("settings.ini"), b"local").unwrap();
+        fs::write(duck.join("inputprofiles/pad.ini"), b"local").unwrap();
+        let emulator = emulator_by_id("duckstation").unwrap();
+        let files = collect_sync_files(&duck, &emulator).unwrap();
+        assert_eq!(files, vec![duck.join("memcards/card.mcd")]);
+    }
+
+    #[test]
+    fn srm_presets_are_generated_from_sync_roots() {
+        let config = DesktopConfig {
+            srm: SrmConfig {
+                roms_directory: "/games/roms".to_owned(),
+                ..DesktopConfig::default().srm
+            },
+            sync_roots: vec![SyncRoot {
+                emulator_id: "dolphin-dev".to_owned(),
+                path: "/games/emulators/Dolphin".to_owned(),
+                emulator_executable: "/games/emulators/Dolphin/dolphin-emu".to_owned(),
+                remote_prefix: "dolphin-dev".to_owned(),
+                pull_paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let presets = srm_parser_presets(&config);
+        assert_eq!(presets["parsers"].as_array().unwrap().len(), 1);
+        assert_eq!(presets["parsers"][0]["romDirectory"], "/games/roms");
+        assert_eq!(
+            presets["parsers"][0]["executable"],
+            "/games/emulators/Dolphin/dolphin-emu"
+        );
+        assert!(
+            presets["parsers"][0]["configTitle"]
+                .as_str()
+                .unwrap()
+                .contains("Dolphin")
+        );
     }
 }

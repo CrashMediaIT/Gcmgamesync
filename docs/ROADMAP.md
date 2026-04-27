@@ -8,8 +8,13 @@
 
 ## Next feature: EmuDeck replacement mode
 - Add an optional install checkbox to the Windows/Linux client.
-- Let the user choose emulator install and ROM library locations.
+- Let the user choose emulator install and ROM library locations. The Rust `setup-desktop` command now stores these paths in the shared desktop config.
 - Download/install supported emulators in portable mode per OS.
-- Install Steam ROM Manager and generate parser presets so imported Steam shortcuts launch correctly.
-- Add Linux game-mode background sync through a Decky Loader plugin.
+- Install Steam ROM Manager and generate parser presets so imported Steam shortcuts launch correctly. The Rust `generate-srm` command now writes initial parser presets from configured sync roots.
+- Add Linux game-mode background sync through a Decky Loader plugin. Packaging now includes a Decky companion manifest while sync remains in the Rust user service.
 - Keep emulator user configuration device-local while syncing save-compatible data between Windows and Linux builds.
+
+## Desktop packaging foundation
+- Build Windows as MSI with Windows Service registration.
+- Build Linux as native packages using a systemd user service before considering Flatpak.
+- Keep the Steam Deck plugin as a game-mode companion for status/control rather than the sync engine.

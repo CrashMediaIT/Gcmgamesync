@@ -50,7 +50,29 @@ cargo run -- server
 cargo run -- manifest
 cargo run -- scan --root /path/to/emulators
 cargo run -- status --root /path/to/emulators
+cargo run -- desktop-config
+cargo run -- setup-desktop --server https://sync.example.com --token <token> --rom-root /games/roms --emulator-root /games/emulators
+cargo run -- daemon --once
+cargo run -- generate-srm
 ```
+
+The desktop foundation stays in Rust and uses a shared JSON config file. On Linux the default path is
+`~/.config/crash-crafts-game-sync/desktop-config.json`; on Windows it is stored under
+`%APPDATA%\CrashCrafts\GameSync\desktop-config.json`. The daemon scans configured emulator roots
+with `shared/emulators.json`, pushes manifest-approved save files to `/api/files/{path}`, can pull
+explicitly configured remote paths, and generates Steam ROM Manager parser presets.
+
+## Desktop packaging direction
+
+- Windows builds should ship as an MSI that installs the Rust daemon as the
+  `CrashCraftsGameSync` Windows Service. A WiX template is in `packaging/windows/Product.wxs`.
+- Linux builds should ship native packages first (`.deb`, then `.rpm` as needed) with a systemd
+  user service from `packaging/linux/crash-crafts-game-sync.service` and a desktop entry from
+  `packaging/linux/crash-crafts-game-sync.desktop`.
+- Steam Deck game mode should use a Decky Loader companion plugin manifest in
+  `packaging/steam-deck/decky-plugin/plugin.json`; the plugin should control/status the daemon
+  rather than sync files itself.
+- Flatpak is deferred until there is a GUI-only client that can talk to an already-installed daemon.
 
 ## HTTP API MVP
 
@@ -63,6 +85,7 @@ cargo run -- status --root /path/to/emulators
 - `POST /api/invites` admin-only invite creation.
 - `POST /api/register` invite-based registration that returns a TOTP secret/provisioning URI.
 - `PUT /api/files/{relative-path}` authenticated file upload with version retention.
+- `GET /api/files/{relative-path}` authenticated file download for configured desktop pulls.
 - `POST /api/logs` authenticated client log upload.
 
 ## Roadmap

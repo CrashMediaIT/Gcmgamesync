@@ -1,0 +1,19 @@
+[Unit]
+Description=Crash Crafts Game Sync desktop daemon
+Documentation=https://github.com/CrashMediaIT/Gcmgamesync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/crash-crafts-game-sync daemon --config %h/.config/crash-crafts-game-sync/desktop-config.json
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/crash-crafts-game-sync %h/Games %h/Emulation %h/.steam
+
+[Install]
+WantedBy=default.target
