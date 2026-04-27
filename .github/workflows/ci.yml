@@ -18,6 +18,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set date-based version
+        run: |
+          VERSION="$(date -u +'%Y.%m%d').${{ github.run_number }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          sed -i "/^name = \"crash-crafts-game-sync\"/{n;s/^version = \".*\"/version = \"${VERSION}\"/}" Cargo.lock
+
       - name: Check formatting
         run: cargo fmt --check
 

@@ -458,9 +458,7 @@ fn pick_dolphin_dev_url(html: &str, os: &str) -> Option<String> {
     let mut search = html;
     while let Some(idx) = search.find(needle) {
         let tail = &search[idx..];
-        let end = tail
-            .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '<' || c == '>')
-            .unwrap_or(tail.len());
+        let end = tail.find(['"', '\'', ' ', '<', '>']).unwrap_or(tail.len());
         let url = &tail[..end];
         let lower = url.to_lowercase();
         let matches = match os {
@@ -484,7 +482,7 @@ fn parse_dolphin_dev_version(html: &str) -> Option<String> {
     // version segment between `dolphin-master-` and the next `-`.
     let marker = "dolphin-master-";
     let after = html.find(marker).map(|i| &html[i + marker.len()..])?;
-    let end = after.find(|c: char| c == '-' || c == '.' || c == '"' || c == '<')?;
+    let end = after.find(['-', '.', '"', '<'])?;
     let version = &after[..end];
     if version.is_empty() {
         None
