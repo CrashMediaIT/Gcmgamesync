@@ -105,7 +105,15 @@
       "detect_paths": ["Dolphin", "dolphin-emu"],
       "sync_include": ["User/GC/**", "User/Wii/title/**/data/**", "User/StateSaves/**", "User/Load/**"],
       "sync_exclude": ["User/Config/**", "User/GameSettings/**", "User/Logs/**", "User/Cache/**"],
-      "updates": {"windows": {"source": "dolphin-dev", "channel": "dev"}, "linux": {"source": "flatpak-or-distro", "package": "org.DolphinEmu.dolphin-emu"}}
+      "updates": {"windows": {"source": "dolphin-dev", "channel": "dev"}, "linux": {"source": "flatpak-or-distro", "package": "org.DolphinEmu.dolphin-emu"}},
+      "downloads": {
+        "windows": {"url": "", "sha256": "", "archive": "7z"},
+        "linux": {"url": "", "sha256": "", "archive": "appimage"}
+      }
     }
-  ]
+  ],
+  "srm_download": {
+    "windows": {"url": "", "sha256": "", "archive": "zip"},
+    "linux": {"url": "", "sha256": "", "archive": "AppImage"}
+  }
 }

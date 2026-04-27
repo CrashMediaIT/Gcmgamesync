@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crash Crafts Game Sync — Desktop</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="desktop">
+<main class="shell">
+  <nav>
+    <div class="logo"><span class="mark"></span><span>Crash Crafts Game Sync</span></div>
+    <div class="nav-tabs">
+      <a href="#" class="nav-link active" data-view="status">Status</a>
+      <a href="#" class="nav-link" data-view="emulators">Emulators</a>
+      <a href="#" class="nav-link" data-view="srm">SRM</a>
+      <a href="#" class="nav-link" data-view="folders">Folders</a>
+      <a href="#" class="nav-link" data-view="activity">Activity</a>
+      <a href="#" class="nav-link" data-view="settings">Settings</a>
+    </div>
+    <div class="nav-actions">
+      <span class="pill"><span class="dot" id="conn-dot"></span><span id="conn-label">disconnected</span></span>
+    </div>
+  </nav>
+
+  <section class="view" data-view="status">
+    <h2>Sync status</h2>
+    <p class="muted">Push-pull save synchronization with the Crash Crafts Game Sync Docker server.</p>
+    <div class="stats" id="status-tiles"></div>
+    <div class="actions">
+      <button id="sync-now-btn" type="button">Sync now</button>
+      <button id="pause-btn" type="button" class="secondary">Pause</button>
+      <button id="open-rom-btn" type="button" class="secondary">Open ROM folder</button>
+      <button id="open-emu-btn" type="button" class="secondary">Open emulator folder</button>
+    </div>
+    <h3 style="margin-top:24px">Recent sync results</h3>
+    <div id="status-recent"></div>
+  </section>
+
+  <section class="view hidden" data-view="emulators">
+    <h2>Emulators</h2>
+    <p class="muted">Detect installed emulators in your emulator install root, install portable builds when a download is available in the manifest, and control which emulators participate in sync.</p>
+    <div id="emulators-table"></div>
+  </section>
+
+  <section class="view hidden" data-view="srm">
+    <h2>Steam ROM Manager</h2>
+    <p class="muted">Generate per-emulator parser presets that point Steam ROM Manager at your ROM library and the configured emulator binaries.</p>
+    <div id="srm-status"></div>
+    <div class="actions">
+      <button id="install-srm-btn" type="button">Install SRM portable</button>
+      <button id="generate-srm-btn" type="button" class="secondary">Generate parsers</button>
+    </div>
+    <p id="srm-result" class="result"></p>
+    <div id="srm-presets"></div>
+  </section>
+
+  <section class="view hidden" data-view="folders">
+    <h2>Folders</h2>
+    <p class="muted">Use separate roots for the emulator install directory and the ROM library, exactly like OneDrive's "vault" and "files" folders. Multiple roots of each kind are supported.</p>
+    <div class="card-pair">
+      <div class="card">
+        <h3>Emulator install roots</h3>
+        <ul id="emu-roots-list" class="log-list"></ul>
+        <form id="add-emu-root" class="form inline">
+          <label>Add path<input name="path" required placeholder="/home/you/Emulation"></label>
+          <button type="submit">Add</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>ROM library roots</h3>
+        <ul id="rom-roots-list" class="log-list"></ul>
+        <form id="add-rom-root" class="form inline">
+          <label>Add path<input name="path" required placeholder="/home/you/Games/Roms"></label>
+          <button type="submit">Add</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section class="view hidden" data-view="activity">
+    <h2>Activity</h2>
+    <p class="muted">Tail of the most recent sync passes and any errors reported by the daemon.</p>
+    <div id="activity-list"></div>
+    <div class="actions">
+      <button id="open-log-btn" type="button" class="secondary">Open log file</button>
+    </div>
+  </section>
+
+  <section class="view hidden" data-view="settings">
+    <h2>Settings</h2>
+    <form id="settings-form" class="form">
+      <label>Docker server URL<input name="server_url" type="url" placeholder="https://sync.example.com" required></label>
+      <label>Auth token (paste from invite)<input name="auth_token" required></label>
+      <label>Sync interval (seconds)<input name="interval_seconds" type="number" min="5" value="60"></label>
+      <label>Device name<input name="device_name" placeholder="Living-room PC"></label>
+      <label class="toggle">
+        <input type="checkbox" name="install_service" id="install-service-toggle">
+        <span>Install background service / autostart</span>
+      </label>
+      <button type="submit">Save settings</button>
+      <p id="settings-result" class="result"></p>
+    </form>
+  </section>
+</main>
+<script src="/static/gui.js"></script>
+</body></html>

@@ -35,6 +35,45 @@ pub fn manifest() -> Value {
     serde_json::from_str(MANIFEST_JSON).expect("embedded manifest is valid JSON")
 }
 
+/// Apply admin-published emulator update overrides to the bundled manifest.
+/// Admins use `POST /api/admin/emulators` to publish per-OS portable download
+/// URLs and SHA-256 checksums; this overlay is what every desktop client sees
+/// when it calls `GET /api/emulators` or runs the GUI's "Install" buttons, so
+/// emulator updates land for all users at once without redeploying the Docker
+/// image.
+pub fn live_manifest(state: &Value) -> Value {
+    let mut manifest = manifest();
+    let updates = state
+        .get("emulator_updates")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let Some(emulators) = manifest["emulators"].as_array_mut() else {
+        return manifest;
+    };
+    for emulator in emulators {
+        let Some(id) = emulator["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(per_os) = updates.get(&id).and_then(|v| v.as_object()) else {
+            continue;
+        };
+        if !emulator["downloads"].is_object() {
+            emulator["downloads"] = json!({});
+        }
+        for (os, override_value) in per_os {
+            let url = override_value
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if url.is_empty() {
+                continue;
+            }
+            emulator["downloads"][os] = override_value.clone();
+        }
+    }
+    manifest
+}
+
 pub fn current_os() -> &'static str {
     match env::consts::OS {
         "windows" => "windows",
@@ -192,7 +231,10 @@ pub fn read_desktop_config(path: &Path) -> AppResult<DesktopConfig> {
 }
 
 pub fn write_desktop_config(path: &Path, config: &DesktopConfig) -> AppResult<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
         secure_create_dir_all(parent)?;
     }
     let mut file = fs::File::create(path)?;
@@ -348,6 +390,69 @@ pub fn run_desktop_sync_once(config: &DesktopConfig) -> AppResult<Value> {
     Ok(json!({"pushed": pushed, "pulled": pulled, "errors": errors}))
 }
 
+/// Build the JSON body for a `/api/devices/heartbeat` request describing the
+/// current device, its configured sync roots, and the result of the last sync
+/// pass.
+pub fn heartbeat_payload(config: &DesktopConfig, last_sync: &Value) -> Value {
+    let hostname = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|s| s.trim().to_owned())
+        })
+        .unwrap_or_default();
+    let pushed = last_sync["pushed"].as_array().map_or(0, Vec::len);
+    let pulled = last_sync["pulled"].as_array().map_or(0, Vec::len);
+    let errors = last_sync["errors"].as_array().map_or(0, Vec::len);
+    let state = if errors > 0 { "error" } else { "idle" };
+    let last_error = last_sync["errors"]
+        .as_array()
+        .and_then(|errs| errs.first())
+        .and_then(|err| err["error"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    json!({
+        "device_id": config.device_id,
+        "device_name": config.device_name,
+        "hostname": hostname,
+        "os": current_os(),
+        "rom_roots": config.rom_roots,
+        "emulator_roots": config.emulator_roots,
+        "state": state,
+        "files_pushed": pushed,
+        "files_pulled": pulled,
+        "last_sync": {
+            "pushed": pushed,
+            "pulled": pulled,
+            "errors": errors,
+            "timestamp": unix_time()
+        },
+        "last_error": last_error
+    })
+}
+
+/// Send a heartbeat to the configured Docker server, returning the response
+/// body. Errors are returned to the caller so the daemon can keep going even
+/// when the server is briefly unavailable.
+pub fn send_heartbeat(config: &DesktopConfig, last_sync: &Value) -> AppResult<Value> {
+    let server = validate_server_url(&config.server_url)?
+        .trim_end_matches('/')
+        .to_owned();
+    if config.auth_token.trim().is_empty() {
+        return Err("auth_token is required to send heartbeat".into());
+    }
+    let payload = heartbeat_payload(config, last_sync);
+    let mut response = ureq::post(&format!("{server}/api/devices/heartbeat"))
+        .header("Authorization", &format!("Bearer {}", config.auth_token))
+        .send_json(payload)?
+        .into_body();
+    Ok(response.read_json()?)
+}
+
 pub fn srm_parser_presets(config: &DesktopConfig) -> Value {
     let parsers = config
         .sync_roots
@@ -387,6 +492,184 @@ pub fn write_srm_parsers(config: &DesktopConfig) -> AppResult<PathBuf> {
     secure_file(&file)?;
     file.write_all(&serde_json::to_vec_pretty(&srm_parser_presets(config))?)?;
     Ok(path)
+}
+
+/// Description of where to download an emulator/SRM portable build for the
+/// current OS. Built from the optional `downloads.<os>` entry of an emulator
+/// manifest entry; returns `None` when the manifest doesn't ship a download
+/// URL for this OS (the GUI then falls back to opening the homepage).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadSpec {
+    pub url: String,
+    pub sha256: Option<String>,
+    pub archive: String,
+    pub strip_components: usize,
+}
+
+pub fn emulator_download_spec(emulator: &Value, os: &str) -> Option<DownloadSpec> {
+    let entry = emulator["downloads"][os].as_object()?;
+    let url = entry.get("url")?.as_str()?.to_owned();
+    if url.trim().is_empty() {
+        return None;
+    }
+    Some(DownloadSpec {
+        url,
+        sha256: entry
+            .get("sha256")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        archive: entry
+            .get("archive")
+            .and_then(|v| v.as_str())
+            .unwrap_or("zip")
+            .to_owned(),
+        strip_components: entry
+            .get("strip_components")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+    })
+}
+
+/// Download a portable emulator build (or any other file) over HTTPS, write it
+/// to `destination`, and verify the SHA-256 checksum when one was supplied.
+/// Returns the number of bytes written.
+///
+/// This is the primitive used by the GUI's "Install" buttons. Extraction of
+/// archives is intentionally left to the platform's built-in tooling so we do
+/// not pull a zip/tar dependency into the headless server build.
+pub fn download_with_checksum(spec: &DownloadSpec, destination: &Path) -> AppResult<u64> {
+    if !spec.url.starts_with("https://") {
+        return Err("emulator download URL must use HTTPS".into());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut response = ureq::get(&spec.url).call()?.into_body();
+    let bytes = response.read_to_vec()?;
+    if let Some(expected) = &spec.sha256 {
+        use sha2::Digest;
+        let actual = hex_lower(&sha2::Sha256::digest(&bytes));
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "checksum mismatch for {}: expected {expected}, got {actual}",
+                spec.url
+            )
+            .into());
+        }
+    }
+    let mut file = fs::File::create(destination)?;
+    secure_file(&file)?;
+    file.write_all(&bytes)?;
+    Ok(bytes.len() as u64)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Install (download) a portable emulator build into the configured emulator
+/// root for the current OS. Returns the path on disk for the downloaded
+/// archive. If the manifest does not ship a download URL for this OS, an error
+/// is returned and the GUI should fall back to opening the emulator homepage.
+///
+/// The desktop app first asks the configured Docker server for the live
+/// manifest (which contains any admin-published emulator updates) so that
+/// rolling out a new emulator version to every user is a single
+/// `POST /api/admin/emulators` call by the admin.
+pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<PathBuf> {
+    let manifest = fetch_live_manifest(config).unwrap_or_else(|_| manifest());
+    let emulator = manifest["emulators"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|em| em["id"].as_str() == Some(emulator_id))
+        .cloned()
+        .ok_or_else(|| format!("unknown emulator id: {emulator_id}"))?;
+    let spec = emulator_download_spec(&emulator, current_os()).ok_or_else(|| {
+        format!(
+            "no portable download URL for {emulator_id} on {}",
+            current_os()
+        )
+    })?;
+    let root = config
+        .emulator_roots
+        .first()
+        .cloned()
+        .ok_or("emulator_roots is empty; pick an emulator install directory first")?;
+    let dir = PathBuf::from(root).join(emulator_id);
+    fs::create_dir_all(&dir)?;
+    let filename = spec
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("emulator.bin");
+    let destination = dir.join(filename);
+    download_with_checksum(&spec, &destination)?;
+    Ok(destination)
+}
+
+fn fetch_live_manifest(config: &DesktopConfig) -> AppResult<Value> {
+    let server = validate_server_url(&config.server_url)?
+        .trim_end_matches('/')
+        .to_owned();
+    let mut response = ureq::get(&format!("{server}/api/emulators"))
+        .header("Authorization", &format!("Bearer {}", config.auth_token))
+        .call()?
+        .into_body();
+    Ok(response.read_json()?)
+}
+
+/// Install (download) the Steam ROM Manager portable build into the SRM
+/// directory using the manifest's `srm_download` entry. Returns the path on
+/// disk for the downloaded archive.
+pub fn install_srm(config: &DesktopConfig) -> AppResult<PathBuf> {
+    let manifest = manifest();
+    let srm = manifest["srm_download"].as_object().ok_or(
+        "manifest has no srm_download entry; configure shared/emulators.json with an srm_download URL",
+    )?;
+    let url = srm
+        .get(current_os())
+        .and_then(|v| v["url"].as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("no SRM portable download URL for {}", current_os()))?
+        .to_owned();
+    let sha = srm
+        .get(current_os())
+        .and_then(|v| v["sha256"].as_str())
+        .map(str::to_owned);
+    let spec = DownloadSpec {
+        url,
+        sha256: sha,
+        archive: "zip".to_owned(),
+        strip_components: 0,
+    };
+    let dir = if config.srm.steam_directory.trim().is_empty() {
+        PathBuf::from(
+            config
+                .emulator_roots
+                .first()
+                .cloned()
+                .ok_or("emulator_roots is empty; pick an install directory first")?,
+        )
+        .join("steam-rom-manager")
+    } else {
+        PathBuf::from(&config.srm.steam_directory).join("steam-rom-manager")
+    };
+    fs::create_dir_all(&dir)?;
+    let filename = spec
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("srm.bin");
+    let destination = dir.join(filename);
+    download_with_checksum(&spec, &destination)?;
+    Ok(destination)
 }
 
 #[derive(Clone)]
@@ -632,7 +915,13 @@ fn list_synced_files(data_dir: &Path, user: &Value) -> AppResult<Value> {
             if !is_admin && owner != user_email {
                 continue;
             }
-            collect_owner_files(&owner_entry.path(), &owner_entry.path(), data_dir, &owner, &mut entries)?;
+            collect_owner_files(
+                &owner_entry.path(),
+                &owner_entry.path(),
+                data_dir,
+                &owner,
+                &mut entries,
+            )?;
         }
     }
     entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
@@ -652,10 +941,7 @@ fn collect_owner_files(
         if p.is_dir() {
             collect_owner_files(base, &p, data_dir, owner, out)?;
         } else if p.is_file() {
-            let relative = p
-                .strip_prefix(base)?
-                .to_string_lossy()
-                .replace('\\', "/");
+            let relative = p.strip_prefix(base)?.to_string_lossy().replace('\\', "/");
             let metadata = fs::metadata(&p)?;
             let modified = metadata
                 .modified()
@@ -671,11 +957,7 @@ fn collect_owner_files(
                         .parent()
                         .unwrap_or_else(|| Path::new("")),
                 )
-                .join(
-                    PathBuf::from(&relative)
-                        .file_name()
-                        .unwrap_or_default(),
-                );
+                .join(PathBuf::from(&relative).file_name().unwrap_or_default());
             let versions_kept = if version_dir.exists() {
                 fs::read_dir(&version_dir)?.count() + 1
             } else {
@@ -873,7 +1155,14 @@ fn bootstrap_store(data_dir: &Path) -> AppResult<JsonStore> {
 
 fn ensure_state_defaults(data: &mut Value) -> bool {
     let mut changed = false;
-    for key in ["users", "invites", "sessions", "settings", "devices"] {
+    for key in [
+        "users",
+        "invites",
+        "sessions",
+        "settings",
+        "devices",
+        "emulator_updates",
+    ] {
         if !data[key].is_object() {
             data[key] = json!({});
             changed = true;
@@ -1162,7 +1451,11 @@ table.data th { color: var(--muted); font-weight: 700; }
 .dot-error { background: var(--error); }
 code { background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 6px; font-size: .85em; }
 body:not(.is-admin) .admin-only { display: none !important; }
-@media (max-width: 820px) { .panel-grid { grid-template-columns: 1fr; } .form.inline { grid-template-columns: 1fr; } }
+.card-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.card-pair .card { padding: 18px; }
+.toggle { display: flex; align-items: center; gap: 10px; }
+.toggle input { width: auto; }
+@media (max-width: 820px) { .panel-grid, .card-pair { grid-template-columns: 1fr; } .form.inline { grid-template-columns: 1fr; } }
 "#;
 
 fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -1253,7 +1546,77 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let store = state.store.lock().unwrap();
             Ok(json_response(200, public_config(&store.read()?)))
         }
-        (Method::Get, "/api/emulators") => Ok(json_response(200, manifest())),
+        (Method::Get, "/api/emulators") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            Ok(json_response(200, live_manifest(&data)))
+        }
+        (Method::Post, "/api/admin/emulators") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let body = read_body(&mut request)?;
+            let id = body["emulator_id"].as_str().unwrap_or("").to_lowercase();
+            let os = body["os"].as_str().unwrap_or("").to_lowercase();
+            if id.is_empty() || (os != "windows" && os != "linux") {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "emulator_id and os (windows|linux) are required"}),
+                ));
+            }
+            if emulator_by_id(&id).is_none() {
+                return Ok(json_response(404, json!({"error": "unknown emulator id"})));
+            }
+            let url = body["url"].as_str().unwrap_or("").to_owned();
+            if !url.is_empty() && !url.starts_with("https://") {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "download URL must use HTTPS"}),
+                ));
+            }
+            let entry = json!({
+                "url": url,
+                "sha256": body["sha256"].as_str().unwrap_or(""),
+                "archive": body["archive"].as_str().unwrap_or("zip"),
+                "version": body["version"].as_str().unwrap_or(""),
+                "published_by": user["email"],
+                "published_at": unix_time()
+            });
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if !data["emulator_updates"].is_object() {
+                data["emulator_updates"] = json!({});
+            }
+            if !data["emulator_updates"][&id].is_object() {
+                data["emulator_updates"][&id] = json!({});
+            }
+            data["emulator_updates"][&id][&os] = entry;
+            store.write(&data)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        (Method::Get, "/api/admin/emulators") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            Ok(json_response(
+                200,
+                json!({"emulator_updates": data["emulator_updates"].clone()}),
+            ))
+        }
         (Method::Post, "/api/setup") => {
             let body = read_body(&mut request)?;
             let store = state.store.lock().unwrap();
@@ -1735,11 +2098,12 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     json!({"error": "missing or invalid bearer token"}),
                 ));
             };
-            Ok(json_response(200, list_synced_files(&state.data_dir, &user)?))
+            Ok(json_response(
+                200,
+                list_synced_files(&state.data_dir, &user)?,
+            ))
         }
-        (Method::Get, path)
-            if path.starts_with("/api/files/") && path.ends_with("/versions") =>
-        {
+        (Method::Get, path) if path.starts_with("/api/files/") && path.ends_with("/versions") => {
             let Some(user) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -1752,7 +2116,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let rel_path = urlencoding::decode(trimmed)?.into_owned();
             let owner_param = query_param(&raw_url, "owner")
                 .map(|s| s.to_lowercase())
-                .filter(|email| user["is_admin"].as_bool().unwrap_or(false) || email == user["email"].as_str().unwrap_or(""))
+                .filter(|email| {
+                    user["is_admin"].as_bool().unwrap_or(false)
+                        || email == user["email"].as_str().unwrap_or("")
+                })
                 .unwrap_or_else(|| user["email"].as_str().unwrap_or("").to_owned());
             Ok(json_response(
                 200,
@@ -2012,9 +2379,13 @@ fn cmd_daemon(args: &[String]) -> AppResult<()> {
         .parse::<u64>()
         .map_err(|_| "--interval-seconds must be a positive integer")?
         .max(5);
+    let skip_heartbeat = args.iter().any(|arg| arg == "--no-heartbeat");
     loop {
         let result = run_desktop_sync_once(&config)?;
         println!("{}", serde_json::to_string_pretty(&result)?);
+        if !skip_heartbeat && let Err(error) = send_heartbeat(&config, &result) {
+            eprintln!("heartbeat failed: {error}");
+        }
         if args.iter().any(|arg| arg == "--once") {
             return Ok(());
         }
@@ -2033,9 +2404,320 @@ fn cmd_generate_srm(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+const STATIC_GUI_HTML: &str = include_str!("../shared/web/gui.html");
+const STATIC_GUI_JS: &str = include_str!("../shared/web/gui.js");
+
+/// Run the local desktop GUI: bind a tiny HTTP server on `127.0.0.1`, open the
+/// system browser to it, and serve the desktop management SPA. The server
+/// exposes `/api/local/*` endpoints that read and mutate the user's
+/// `desktop-config.json` and trigger sync passes against the configured
+/// Docker server.
+pub fn run_desktop_gui(args: &[String]) -> AppResult<()> {
+    let host = optional_arg_value(args, "--host", "127.0.0.1");
+    let port_arg = optional_arg_value(args, "--port", "0");
+    let no_browser = args.iter().any(|arg| arg == "--no-browser");
+    let config_path = config_path_from_args(args)?;
+    if let Some(parent) = config_path.parent()
+        && !parent.exists()
+    {
+        secure_create_dir_all(parent)?;
+    }
+    if !config_path.exists() {
+        let mut default = DesktopConfig::default();
+        if default.device_id.is_empty() {
+            default.device_id = new_token();
+        }
+        write_desktop_config(&config_path, &default)?;
+    }
+    let server = Server::http(format!("{host}:{port_arg}"))?;
+    let addr = server
+        .server_addr()
+        .to_ip()
+        .ok_or("failed to determine local server address")?;
+    let url = format!("http://{}:{}/", addr.ip(), addr.port());
+    eprintln!("Crash Crafts Game Sync desktop GUI listening on {url}");
+    if !no_browser {
+        let _ = open_in_browser(&url);
+    }
+    let state = Arc::new(LocalGuiState {
+        config_path,
+        recent: Mutex::new(Vec::new()),
+        paused: Mutex::new(false),
+    });
+    for request in server.incoming_requests() {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || handle_local_request(state, request));
+    }
+    Ok(())
+}
+
+struct LocalGuiState {
+    config_path: PathBuf,
+    recent: Mutex<Vec<Value>>,
+    paused: Mutex<bool>,
+}
+
+fn handle_local_request(state: Arc<LocalGuiState>, mut request: Request) {
+    let raw_url = request.url().to_owned();
+    let path = raw_url.split('?').next().unwrap_or("").to_owned();
+    let method = request.method().clone();
+    let result: AppResult<Response<std::io::Cursor<Vec<u8>>>> = (|| match (&method, path.as_str()) {
+        (Method::Get, "/") | (Method::Get, "/index.html") => Ok(response(
+            200,
+            STATIC_GUI_HTML.as_bytes().to_vec(),
+            "text/html; charset=utf-8",
+        )),
+        (Method::Get, "/static/app.css") => Ok(response(
+            200,
+            STATIC_APP_CSS.as_bytes().to_vec(),
+            "text/css; charset=utf-8",
+        )),
+        (Method::Get, "/static/gui.js") => Ok(response(
+            200,
+            STATIC_GUI_JS.as_bytes().to_vec(),
+            "application/javascript; charset=utf-8",
+        )),
+        (Method::Get, "/api/local/config") => {
+            let config = read_desktop_config(&state.config_path)?;
+            Ok(json_response(200, serde_json::to_value(config)?))
+        }
+        (Method::Post, "/api/local/config") => {
+            let body = read_body(&mut request)?;
+            let mut config = read_desktop_config(&state.config_path)?;
+            if let Some(value) = body["server_url"].as_str() {
+                config.server_url = value.to_owned();
+            }
+            if let Some(value) = body["auth_token"].as_str() {
+                config.auth_token = value.to_owned();
+            }
+            if let Some(value) = body["device_name"].as_str() {
+                config.device_name = value.to_owned();
+            }
+            if config.device_id.is_empty() {
+                config.device_id = new_token();
+            }
+            if let Some(install) = body["install_service"].as_bool() {
+                config.service.install_on_setup = install;
+            }
+            write_desktop_config(&state.config_path, &config)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        (Method::Get, "/api/local/status") => {
+            let config = read_desktop_config(&state.config_path)?;
+            let recent = state.recent.lock().unwrap().clone();
+            let last = recent.last().cloned();
+            Ok(json_response(
+                200,
+                json!({
+                    "configured": !config.server_url.is_empty() && !config.auth_token.is_empty(),
+                    "server_url": config.server_url,
+                    "sync_roots": config.sync_roots.len(),
+                    "state": if *state.paused.lock().unwrap() { "paused" } else { "idle" },
+                    "last_pushed": last.as_ref().and_then(|v| v["pushed"].as_u64()).unwrap_or(0),
+                    "last_pulled": last.as_ref().and_then(|v| v["pulled"].as_u64()).unwrap_or(0),
+                    "last_errors": last.as_ref().and_then(|v| v["errors"].as_u64()).unwrap_or(0),
+                    "last_sync_at": last.as_ref().and_then(|v| v["timestamp"].as_u64()).unwrap_or(0),
+                    "recent": recent.iter().rev().take(10).cloned().collect::<Vec<_>>()
+                }),
+            ))
+        }
+        (Method::Post, "/api/local/sync-now") => {
+            if *state.paused.lock().unwrap() {
+                return Ok(json_response(409, json!({"error": "sync is paused"})));
+            }
+            let config = read_desktop_config(&state.config_path)?;
+            let result = run_desktop_sync_once(&config)?;
+            let entry = json!({
+                "timestamp": unix_time(),
+                "pushed": result["pushed"].as_array().map_or(0, Vec::len),
+                "pulled": result["pulled"].as_array().map_or(0, Vec::len),
+                "errors": result["errors"].as_array().map_or(0, Vec::len),
+                "first_error": result["errors"][0]["error"].as_str().unwrap_or("")
+            });
+            let mut recent = state.recent.lock().unwrap();
+            recent.push(entry.clone());
+            if recent.len() > 100 {
+                let drop = recent.len() - 100;
+                recent.drain(0..drop);
+            }
+            drop(recent);
+            // Best-effort heartbeat.
+            let _ = send_heartbeat(&config, &result);
+            Ok(json_response(200, json!({"ok": true, "result": result})))
+        }
+        (Method::Post, "/api/local/pause") => {
+            let mut paused = state.paused.lock().unwrap();
+            *paused = !*paused;
+            Ok(json_response(200, json!({"paused": *paused})))
+        }
+        (Method::Get, "/api/local/emulators") => {
+            let config = read_desktop_config(&state.config_path)?;
+            Ok(json_response(200, list_local_emulators(&config)))
+        }
+        (Method::Post, "/api/local/install-emulator") => {
+            let body = read_body(&mut request)?;
+            let id = body["emulator_id"].as_str().unwrap_or("").to_owned();
+            let config = read_desktop_config(&state.config_path)?;
+            match install_emulator(&config, &id) {
+                Ok(path) => Ok(json_response(200, json!({"ok": true, "path": path}))),
+                Err(error) => Ok(json_response(500, json!({"error": error.to_string()}))),
+            }
+        }
+        (Method::Get, "/api/local/srm") => {
+            let config = read_desktop_config(&state.config_path)?;
+            Ok(json_response(200, srm_status(&config)))
+        }
+        (Method::Post, "/api/local/install-srm") => {
+            let config = read_desktop_config(&state.config_path)?;
+            match install_srm(&config) {
+                Ok(path) => Ok(json_response(200, json!({"ok": true, "path": path}))),
+                Err(error) => Ok(json_response(500, json!({"error": error.to_string()}))),
+            }
+        }
+        (Method::Post, "/api/local/generate-srm") => {
+            let config = read_desktop_config(&state.config_path)?;
+            let path = write_srm_parsers(&config)?;
+            Ok(json_response(200, json!({"ok": true, "path": path})))
+        }
+        (Method::Get, "/api/local/folders") => {
+            let config = read_desktop_config(&state.config_path)?;
+            Ok(json_response(
+                200,
+                json!({"emulator_roots": config.emulator_roots, "rom_roots": config.rom_roots}),
+            ))
+        }
+        (Method::Post, "/api/local/folders") => {
+            let body = read_body(&mut request)?;
+            let mut config = read_desktop_config(&state.config_path)?;
+            if let Some(add) = body.get("add") {
+                let kind = add["type"].as_str().unwrap_or("");
+                let path = add["path"].as_str().unwrap_or("").to_owned();
+                if !path.is_empty() {
+                    let target = if kind == "rom" {
+                        &mut config.rom_roots
+                    } else {
+                        &mut config.emulator_roots
+                    };
+                    if !target.contains(&path) {
+                        target.push(path);
+                    }
+                }
+            }
+            if let Some(remove) = body.get("remove") {
+                let kind = remove["type"].as_str().unwrap_or("");
+                let idx = remove["index"].as_u64().unwrap_or(0) as usize;
+                let target = if kind == "rom" {
+                    &mut config.rom_roots
+                } else {
+                    &mut config.emulator_roots
+                };
+                if idx < target.len() {
+                    target.remove(idx);
+                }
+            }
+            write_desktop_config(&state.config_path, &config)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        (Method::Get, "/api/local/activity") => {
+            let entries = state.recent.lock().unwrap().clone();
+            Ok(json_response(
+                200,
+                json!({"entries": entries.iter().rev().cloned().collect::<Vec<_>>()}),
+            ))
+        }
+        (Method::Post, "/api/local/open") => {
+            let folder = query_param(&raw_url, "folder").unwrap_or("rom");
+            let config = read_desktop_config(&state.config_path)?;
+            let path = match folder {
+                "emu" => config.emulator_roots.first().cloned(),
+                "log" => Some(
+                    state
+                        .config_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+                _ => config.rom_roots.first().cloned(),
+            };
+            if let Some(path) = path {
+                let _ = open_in_browser(&path);
+            }
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        _ => Ok(json_response(404, json!({"error": "not found"}))),
+    })();
+    let response =
+        result.unwrap_or_else(|error| json_response(500, json!({"error": error.to_string()})));
+    let _ = request.respond(response);
+}
+
+fn list_local_emulators(config: &DesktopConfig) -> Value {
+    let manifest = manifest();
+    let os = current_os();
+    let mut detected: Vec<Value> = Vec::new();
+    for root in &config.emulator_roots {
+        let root_path = PathBuf::from(root);
+        if root_path.exists() {
+            for found in detect_emulators(&root_path) {
+                detected.push(found);
+            }
+        }
+    }
+    let entries = manifest["emulators"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|emulator| {
+            let id = emulator["id"].as_str().unwrap_or("").to_owned();
+            let installed_match = detected.iter().find(|d| d["id"].as_str() == Some(&id));
+            let installable = emulator_download_spec(&emulator, os).is_some();
+            json!({
+                "id": id,
+                "name": emulator["name"].as_str().unwrap_or(""),
+                "homepage": emulator["homepage"].as_str().unwrap_or(""),
+                "channels": emulator["channels"].clone(),
+                "installed": installed_match.is_some(),
+                "portable": installed_match.and_then(|d| d["portable"].as_bool()).unwrap_or(false),
+                "path": installed_match.and_then(|d| d["path"].as_str().map(str::to_owned)).unwrap_or_default(),
+                "installable": installable
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"emulators": entries})
+}
+
+fn srm_status(config: &DesktopConfig) -> Value {
+    let installed = !config.srm.steam_directory.trim().is_empty()
+        && PathBuf::from(&config.srm.steam_directory).exists();
+    let presets = srm_parser_presets(config)["parsers"].clone();
+    json!({
+        "installed": installed,
+        "steam_directory": config.srm.steam_directory,
+        "parsers_path": config.srm.parsers_path,
+        "presets": presets
+    })
+}
+
+fn open_in_browser(target: &str) -> AppResult<()> {
+    #[cfg(target_os = "windows")]
+    let cmd = ("cmd", vec!["/C", "start", "", target]);
+    #[cfg(target_os = "macos")]
+    let cmd: (&str, Vec<&str>) = ("open", vec![target]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd: (&str, Vec<&str>) = ("xdg-open", vec![target]);
+    let _ = std::process::Command::new(cmd.0)
+        .args(&cmd.1)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!(
         "usage:
+   crash-crafts-game-sync gui [--config <path>] [--host 127.0.0.1] [--port 0] [--no-browser]
    crash-crafts-game-sync companion [--config <path>]
    crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
    crash-crafts-game-sync manifest
@@ -2061,6 +2743,7 @@ pub fn run_cli() -> AppResult<()> {
     let args: Vec<String> = env::args().collect();
     match command_name(&args) {
         "companion" => cmd_companion(&args),
+        "gui" => run_desktop_gui(&args),
         "server" => run_server(&args),
         "manifest" => {
             println!("{}", serde_json::to_string_pretty(&manifest())?);
@@ -2354,5 +3037,346 @@ mod tests {
                 .unwrap()
                 .contains("Dolphin")
         );
+    }
+
+    #[test]
+    fn query_param_parses_uri_query_string() {
+        assert_eq!(
+            query_param("/api/logs?limit=50&owner=a", "limit"),
+            Some("50")
+        );
+        assert_eq!(
+            query_param("/api/logs?limit=50&owner=a", "owner"),
+            Some("a")
+        );
+        assert_eq!(query_param("/api/logs", "limit"), None);
+    }
+
+    #[test]
+    fn heartbeat_payload_summarises_last_sync() {
+        let config = DesktopConfig {
+            server_url: "https://sync.example.com".to_owned(),
+            auth_token: "t".to_owned(),
+            device_id: "device-1".to_owned(),
+            device_name: "couch-pc".to_owned(),
+            rom_roots: vec!["/games/roms".to_owned()],
+            emulator_roots: vec!["/games/emu".to_owned()],
+            ..Default::default()
+        };
+        let last_sync = json!({
+            "pushed": [{"local": "/x", "remote": "y"}, {"local": "/x2", "remote": "y2"}],
+            "pulled": [],
+            "errors": [{"local": "/z", "remote": "w", "error": "boom"}]
+        });
+        let payload = heartbeat_payload(&config, &last_sync);
+        assert_eq!(payload["device_id"], "device-1");
+        assert_eq!(payload["device_name"], "couch-pc");
+        assert_eq!(payload["files_pushed"], 2);
+        assert_eq!(payload["files_pulled"], 0);
+        assert_eq!(payload["state"], "error");
+        assert_eq!(payload["last_error"], "boom");
+        assert_eq!(payload["rom_roots"], json!(["/games/roms"]));
+        assert_eq!(payload["emulator_roots"], json!(["/games/emu"]));
+        // OS must be reported separately for Linux vs Windows so the admin can
+        // see which client built which.
+        assert!(
+            payload["os"].as_str().unwrap() == "linux"
+                || payload["os"].as_str().unwrap() == "windows"
+        );
+    }
+
+    #[test]
+    fn live_manifest_overlays_admin_emulator_updates() {
+        let state = json!({
+            "emulator_updates": {
+                "duckstation": {
+                    "windows": {
+                        "url": "https://example.invalid/duckstation-win.zip",
+                        "sha256": "deadbeef",
+                        "archive": "zip",
+                        "version": "0.1.7080"
+                    },
+                    "linux": {
+                        "url": "https://example.invalid/duckstation-linux.AppImage",
+                        "sha256": "feedface",
+                        "archive": "appimage",
+                        "version": "0.1.7080"
+                    }
+                }
+            }
+        });
+        let manifest = live_manifest(&state);
+        let duck = manifest["emulators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "duckstation")
+            .unwrap();
+        assert_eq!(
+            duck["downloads"]["windows"]["url"],
+            "https://example.invalid/duckstation-win.zip"
+        );
+        assert_eq!(
+            duck["downloads"]["linux"]["url"],
+            "https://example.invalid/duckstation-linux.AppImage"
+        );
+        // Cemu wasn't overridden, so it must remain whatever the bundled
+        // manifest carries (or absent).
+        let cemu = manifest["emulators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "cemu")
+            .unwrap();
+        let cemu_url = cemu["downloads"]["windows"]["url"].as_str().unwrap_or("");
+        assert!(cemu_url.is_empty() || cemu_url.starts_with("https://"));
+    }
+
+    #[test]
+    fn emulator_download_spec_returns_none_when_no_url_for_os() {
+        let mut emulator = json!({"downloads": {"linux": {"url": ""}}});
+        assert!(emulator_download_spec(&emulator, "linux").is_none());
+        emulator["downloads"]["linux"]["url"] = json!("https://example.invalid/x.AppImage");
+        let spec = emulator_download_spec(&emulator, "linux").unwrap();
+        assert_eq!(spec.url, "https://example.invalid/x.AppImage");
+    }
+
+    #[test]
+    fn list_synced_files_walks_owned_files_with_versions() {
+        let temp = TempDir::new().unwrap();
+        // Push the same file twice with different content so a version is
+        // recorded.
+        write_versioned_file(temp.path(), "user@example.com", "saves/a.sav", b"v1").unwrap();
+        write_versioned_file(temp.path(), "user@example.com", "saves/a.sav", b"v2").unwrap();
+        let user = json!({"email": "user@example.com", "is_admin": false});
+        let listing = list_synced_files(temp.path(), &user).unwrap();
+        let files = listing["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["path"], "saves/a.sav");
+        assert!(files[0]["versions"].as_u64().unwrap() >= 2);
+        // Other users must not see this owner's files.
+        let other = json!({"email": "other@example.com", "is_admin": false});
+        let listing = list_synced_files(temp.path(), &other).unwrap();
+        assert!(listing["files"].as_array().unwrap().is_empty());
+        // Admin sees everything.
+        let admin = json!({"email": "admin@example.com", "is_admin": true});
+        let listing = list_synced_files(temp.path(), &admin).unwrap();
+        assert_eq!(listing["files"].as_array().unwrap().len(), 1);
+    }
+
+    /// End-to-end test: spin up the real Docker server in a temp dir, run
+    /// first-run setup, mint an invite, register a desktop client, push a
+    /// real save file via `run_desktop_sync_once`, then pull it back to a
+    /// second device into a different filesystem layout (simulating
+    /// Linux ↔ Windows save synchronization). Verifies that:
+    ///
+    /// * Saves matched by the manifest's `sync_include` ARE pushed.
+    /// * Config files matched by `sync_exclude` are NOT pushed (controllers
+    ///   and emulator settings stay device-local).
+    /// * The pulled bytes on the second device are byte-identical to the
+    ///   pushed bytes from the first device.
+    #[test]
+    fn push_pull_round_trip_syncs_only_manifest_approved_files_across_devices() {
+        let server_dir = TempDir::new().unwrap();
+        let port = pick_free_port();
+        let bind = format!("127.0.0.1:{port}");
+        let server_data = server_dir.path().to_path_buf();
+        let listener = Server::http(&bind).unwrap();
+        let state = Arc::new(AppState {
+            store: Mutex::new(JsonStore::new(server_data.join("state.json")).unwrap()),
+            data_dir: server_data.clone(),
+        });
+        let server_state = Arc::clone(&state);
+        let handle = std::thread::spawn(move || {
+            for request in listener.incoming_requests() {
+                let s = Arc::clone(&server_state);
+                std::thread::spawn(move || handle_request(request, s));
+            }
+        });
+
+        let base = format!("http://{bind}");
+        // 1. First-run setup creates the admin.
+        let setup: Value = ureq::post(&format!("{base}/api/setup"))
+            .send_json(json!({
+                "admin_email": "admin@example.com",
+                "admin_password": "supersecret-password-123",
+                "smtp_tenant_id": "tenant",
+                "smtp_client_id": "client",
+                "smtp_from_email": "noreply@example.com"
+            }))
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap();
+        assert!(
+            setup["otpauth_uri"]
+                .as_str()
+                .unwrap()
+                .contains("otpauth://")
+        );
+        // Mint an admin session by injecting one directly so the test does
+        // not need a real TOTP roundtrip.
+        let admin_token = {
+            let store = state.store.lock().unwrap();
+            let mut data = store.read().unwrap();
+            let token = new_token();
+            data["sessions"][&token] =
+                json!({"email": "admin@example.com", "issued_at": unix_time()});
+            store.write(&data).unwrap();
+            token
+        };
+
+        // 2. Admin invites a device user.
+        let invite: Value = ureq::post(&format!("{base}/api/invites"))
+            .header("Authorization", &format!("Bearer {admin_token}"))
+            .send_json(json!({"email": "device@example.com"}))
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap();
+        let invite_token = invite["invite_token"].as_str().unwrap().to_owned();
+
+        // 3. Promote the invite to a real user with a session token so the
+        // desktop client can authenticate. We do this directly via the
+        // store to keep the test focused on the push/pull mechanic.
+        let device_token = {
+            let store = state.store.lock().unwrap();
+            let mut data = store.read().unwrap();
+            data["users"]["device@example.com"] = json!({
+                "email": "device@example.com",
+                "is_admin": false,
+                "registered": true,
+                "disabled": false
+            });
+            data["invites"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&invite_token);
+            let token = new_token();
+            data["sessions"][&token] =
+                json!({"email": "device@example.com", "issued_at": unix_time()});
+            store.write(&data).unwrap();
+            token
+        };
+
+        // 4. Set up a Linux-style emulator install on "device A" with a real
+        // save and a real config file (which must NOT be synced).
+        let device_a = TempDir::new().unwrap();
+        let duck_a = device_a.path().join("DuckStation");
+        fs::create_dir_all(duck_a.join("memcards")).unwrap();
+        fs::create_dir_all(duck_a.join("inputprofiles")).unwrap();
+        fs::write(duck_a.join("memcards/card1.mcd"), b"AAAAAA-this-is-a-save").unwrap();
+        fs::write(duck_a.join("settings.ini"), b"DEVICE-A-LOCAL-SETTINGS").unwrap();
+        fs::write(duck_a.join("inputprofiles/pad.ini"), b"DEVICE-A-CONTROLLER").unwrap();
+
+        let config_a = DesktopConfig {
+            server_url: base.clone(),
+            auth_token: device_token.clone(),
+            sync_roots: vec![SyncRoot {
+                emulator_id: "duckstation".to_owned(),
+                path: duck_a.to_string_lossy().into_owned(),
+                emulator_executable: String::new(),
+                remote_prefix: "duckstation".to_owned(),
+                pull_paths: vec!["memcards/card1.mcd".to_owned()],
+            }],
+            ..Default::default()
+        };
+
+        let result = run_desktop_sync_once(&config_a).unwrap();
+        let pushed = result["pushed"].as_array().unwrap();
+        // Only the save was pushed; settings.ini and the controller profile
+        // must remain device-local.
+        assert_eq!(
+            pushed.len(),
+            1,
+            "exactly one save should be pushed, got: {:#?}",
+            pushed
+        );
+        let pushed_remote = pushed[0]["remote"].as_str().unwrap();
+        assert_eq!(pushed_remote, "duckstation/memcards/card1.mcd");
+
+        // 5. "Device B" is a different machine (Windows-style would behave
+        // identically; the storage is path-based and OS-agnostic). Pull the
+        // save into a fresh emulator directory.
+        let device_b = TempDir::new().unwrap();
+        let duck_b = device_b.path().join("DuckStation");
+        fs::create_dir_all(&duck_b).unwrap();
+        let config_b = DesktopConfig {
+            server_url: base.clone(),
+            auth_token: device_token.clone(),
+            sync_roots: vec![SyncRoot {
+                emulator_id: "duckstation".to_owned(),
+                path: duck_b.to_string_lossy().into_owned(),
+                emulator_executable: String::new(),
+                remote_prefix: "duckstation".to_owned(),
+                pull_paths: vec!["memcards/card1.mcd".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let result_b = run_desktop_sync_once(&config_b).unwrap();
+        assert!(
+            result_b["errors"].as_array().unwrap().is_empty(),
+            "pull should have no errors, got: {:#?}",
+            result_b["errors"]
+        );
+        let pulled = result_b["pulled"].as_array().unwrap();
+        assert_eq!(pulled.len(), 1);
+        let pulled_bytes = fs::read(duck_b.join("memcards/card1.mcd")).unwrap();
+        assert_eq!(pulled_bytes, b"AAAAAA-this-is-a-save");
+        // The config file from device A must not have made it to the server,
+        // so device B's directory must NOT contain it.
+        assert!(!duck_b.join("settings.ini").exists());
+        assert!(!duck_b.join("inputprofiles/pad.ini").exists());
+
+        // 6. Heartbeat lands and is retrievable via /api/devices.
+        send_heartbeat(&config_b, &result_b).unwrap();
+        let devices: Value = ureq::get(&format!("{base}/api/devices"))
+            .header("Authorization", &format!("Bearer {device_token}"))
+            .call()
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap();
+        assert!(!devices["devices"].as_array().unwrap().is_empty());
+
+        // 7. Admin publishes a per-OS emulator update; live manifest reflects
+        // it and the desktop sees the new download URL.
+        let _: Value = ureq::post(&format!("{base}/api/admin/emulators"))
+            .header("Authorization", &format!("Bearer {admin_token}"))
+            .send_json(json!({
+                "emulator_id": "duckstation",
+                "os": "linux",
+                "url": "https://example.invalid/duckstation-linux.AppImage",
+                "sha256": "feedface",
+                "archive": "appimage",
+                "version": "0.1.7100"
+            }))
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap();
+        let live: Value = ureq::get(&format!("{base}/api/emulators"))
+            .call()
+            .unwrap()
+            .into_body()
+            .read_json()
+            .unwrap();
+        let duck = live["emulators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "duckstation")
+            .unwrap();
+        assert_eq!(
+            duck["downloads"]["linux"]["url"],
+            "https://example.invalid/duckstation-linux.AppImage"
+        );
+
+        drop(handle);
+    }
+
+    fn pick_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
     }
 }
