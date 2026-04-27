@@ -233,8 +233,11 @@ fn verify_totp(secret: &str, code: &str, now: Option<u64>, window: i64) -> bool 
 }
 
 fn otpauth_uri(email: &str, secret: &str) -> String {
+    let issuer = urlencoding::encode(APP_NAME);
+    let label_text = format!("{APP_NAME}:{email}");
+    let label = urlencoding::encode(&label_text);
     format!(
-        "otpauth://totp/{APP_NAME}:{email}?secret={secret}&issuer={APP_NAME}&algorithm=SHA1&digits=6&period=30"
+        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30"
     )
 }
 
@@ -428,7 +431,7 @@ fn validate_logo_data_url(data_url: &str) -> AppResult<()> {
     ) {
         return Err("logo must be a PNG, JPEG, or SVG data URL".into());
     }
-    if payload.len() > 350_000 {
+    if payload.len() > 349_528 {
         return Err("logo must be smaller than 256 KiB".into());
     }
     let decoded = general_purpose::STANDARD.decode(payload)?;
@@ -923,10 +926,17 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
     let _ = request.respond(response);
 }
 
-fn run_server() -> AppResult<()> {
-    let data_dir = PathBuf::from(env::var("GCM_DATA_DIR").unwrap_or_else(|_| "/data".to_owned()));
-    let host = env::var("GCM_HOST").unwrap_or_else(|_| "0.0.0.0".to_owned());
-    let port = env::var("GCM_PORT").unwrap_or_else(|_| "8080".to_owned());
+fn optional_arg_value(args: &[String], name: &str, fallback: &str) -> String {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].clone())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn run_server(args: &[String]) -> AppResult<()> {
+    let data_dir = PathBuf::from(optional_arg_value(args, "--data-dir", "/data"));
+    let host = optional_arg_value(args, "--host", "127.0.0.1");
+    let port = optional_arg_value(args, "--port", "8080");
     let server = Server::http(format!("{host}:{port}"))?;
     let state = Arc::new(AppState {
         data_dir: data_dir.clone(),
@@ -988,7 +998,7 @@ fn cmd_upload_log(args: &[String]) -> AppResult<()> {
 fn print_usage() {
     eprintln!(
         "usage:
-   crash-crafts-game-sync server
+   crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
    crash-crafts-game-sync manifest
    crash-crafts-game-sync scan --root <path>
    crash-crafts-game-sync status --root <path>
@@ -999,7 +1009,7 @@ fn print_usage() {
 fn main() -> AppResult<()> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str).unwrap_or("server") {
-        "server" => run_server(),
+        "server" => run_server(&args),
         "manifest" => {
             println!("{}", serde_json::to_string_pretty(&manifest())?);
             Ok(())

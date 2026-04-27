@@ -9,6 +9,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp
     volumes:
       - crash-crafts-game-sync-data:/data
 volumes:

@@ -18,4 +18,4 @@ COPY shared ./shared
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 8080
-CMD ["crash-crafts-game-sync", "server"]
+CMD ["crash-crafts-game-sync", "server", "--host", "0.0.0.0", "--port", "8080", "--data-dir", "/data"]
