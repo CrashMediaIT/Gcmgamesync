@@ -1,8 +1,8 @@
-# Gcmgamesync roadmap
+# Crash Crafts Game Sync roadmap
 
 ## MVP foundation
-- Rust Docker-hosted server with web UI, user invitation, registration, 2FA, file storage, five-total-copy retention, and client log ingestion.
-- Rust Windows/Linux CLI client that detects supported emulators, reports sync status, preserves device-local configuration, and uploads errors.
+- Rust Docker-hosted server with Web UI setup, user invitation, registration, 2FA, file storage, five-total-copy retention, and client log ingestion.
+- Future Windows/Linux GUI clients that detect supported emulators, report sync status, preserve device-local configuration, and upload errors.
 - Emulator manifest for DuckStation, PCSX2 nightly, RPCS3 nightly, Xenia Canary, xemu, Cemu, RetroArch, Eden nightly, and Dolphin dev builds.
 - SMTP-backed invitation email delivery instead of manual invite-token delivery.
 

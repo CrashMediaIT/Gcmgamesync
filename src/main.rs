@@ -7,13 +7,17 @@ use sha1::Sha1;
 use sha2::Sha256;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MANIFEST_JSON: &str = include_str!("../shared/emulators.json");
+const APP_NAME: &str = "Crash Crafts Game Sync";
 const PASSWORD_ITERATIONS: u32 = 240_000;
+const MAX_LOGO_BYTES: usize = 262_144;
+const MAX_LOGO_BASE64_SIZE: usize = 349_528;
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -95,7 +99,18 @@ impl JsonStore {
         }
         let store = Self { path };
         if !store.path.exists() {
-            store.write(&json!({"users": {}, "invites": {}, "sessions": {}, "logs": []}))?;
+            store.write(&json!({
+                "setup_complete": false,
+                "users": {},
+                "invites": {},
+                "sessions": {},
+                "logs": [],
+                "settings": {
+                    "app_name": APP_NAME,
+                    "smtp": {},
+                    "branding": {}
+                }
+            }))?;
         }
         Ok(store)
     }
@@ -106,13 +121,45 @@ impl JsonStore {
 
     fn write(&self, data: &Value) -> AppResult<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+            secure_create_dir_all(parent)?;
         }
         let tmp = self.path.with_extension("tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(data)?)?;
+        let mut file = fs::File::create(&tmp)?;
+        secure_file(&file)?;
+        file.write_all(&serde_json::to_vec_pretty(data)?)?;
         fs::rename(tmp, &self.path)?;
         Ok(())
     }
+}
+
+fn secure_create_dir_all(path: &Path) -> AppResult<()> {
+    fs::create_dir_all(path)?;
+    secure_dir(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_dir(path: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_dir(_path: &Path) -> AppResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_file(file: &fs::File) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_file(_file: &fs::File) -> AppResult<()> {
+    Ok(())
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {
@@ -188,8 +235,11 @@ fn verify_totp(secret: &str, code: &str, now: Option<u64>, window: i64) -> bool 
 }
 
 fn otpauth_uri(email: &str, secret: &str) -> String {
+    let issuer = urlencoding::encode(APP_NAME);
+    let label_text = format!("{APP_NAME}:{email}");
+    let label = urlencoding::encode(&label_text);
     format!(
-        "otpauth://totp/Gcmgamesync:{email}?secret={secret}&issuer=Gcmgamesync&algorithm=SHA1&digits=6&period=30"
+        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30"
     )
 }
 
@@ -249,8 +299,8 @@ fn write_versioned_file(
         .join(owner)
         .join(relative.parent().unwrap_or_else(|| Path::new("")))
         .join(file_name);
-    fs::create_dir_all(base.parent().ok_or("file path must include a parent")?)?;
-    fs::create_dir_all(&version_dir)?;
+    secure_create_dir_all(base.parent().ok_or("file path must include a parent")?)?;
+    secure_create_dir_all(&version_dir)?;
 
     let changed = if base.exists() {
         fs::read(&base)? != content
@@ -273,7 +323,9 @@ fn write_versioned_file(
         }
     }
     if changed {
-        fs::write(&base, content)?;
+        let mut file = fs::File::create(&base)?;
+        secure_file(&file)?;
+        file.write_all(content)?;
     }
     let versions_kept = fs::read_dir(&version_dir)?.count();
     Ok(
@@ -288,50 +340,224 @@ struct AppState {
 
 fn bootstrap_store(data_dir: &Path) -> AppResult<JsonStore> {
     let store = JsonStore::new(data_dir.join("state.json"))?;
-    let admin_email = env::var("GCM_ADMIN_EMAIL").ok();
-    let admin_password = env::var("GCM_ADMIN_PASSWORD").ok();
-    if let (Some(email), Some(password)) = (admin_email, admin_password) {
-        let mut data = store.read()?;
-        if data["users"].get(&email).is_none() {
-            let secret = new_totp_secret();
-            data["users"][&email] = json!({
-                "email": email,
-                "password_hash": hash_password(&password, None),
-                "totp_secret": secret,
-                "is_admin": true,
-                "registered": true
-            });
-            data["bootstrap_admin_otpauth"] = json!(otpauth_uri(&email, &secret));
-            store.write(&data)?;
-        }
+    let mut data = store.read()?;
+    let changed = ensure_state_defaults(&mut data);
+    if changed {
+        store.write(&data)?;
     }
     Ok(store)
 }
 
-fn render_ui() -> String {
+fn ensure_state_defaults(data: &mut Value) -> bool {
+    let mut changed = false;
+    for key in ["users", "invites", "sessions", "settings"] {
+        if !data[key].is_object() {
+            data[key] = json!({});
+            changed = true;
+        }
+    }
+    if !data["logs"].is_array() {
+        data["logs"] = json!([]);
+        changed = true;
+    }
+    if data["settings"]["app_name"].as_str() != Some(APP_NAME) {
+        data["settings"]["app_name"] = json!(APP_NAME);
+        changed = true;
+    }
+    if !data["settings"]["smtp"].is_object() {
+        data["settings"]["smtp"] = json!({});
+        changed = true;
+    }
+    if !data["settings"]["branding"].is_object() {
+        data["settings"]["branding"] = json!({});
+        changed = true;
+    }
+    if !data["setup_complete"].is_boolean() {
+        let has_admin = data["users"].as_object().is_some_and(|users| {
+            users
+                .values()
+                .any(|user| user["is_admin"].as_bool() == Some(true))
+        });
+        data["setup_complete"] = json!(has_admin);
+        changed = true;
+    }
+    changed
+}
+
+fn setup_complete(data: &Value) -> bool {
+    data["setup_complete"].as_bool().unwrap_or(false)
+}
+
+fn public_config(data: &Value) -> Value {
+    json!({
+        "app_name": APP_NAME,
+        "setup_complete": setup_complete(data),
+        "logo_data_url": data["settings"]["branding"]["logo_data_url"].as_str().unwrap_or("")
+    })
+}
+
+fn require_setup_complete(data: &Value) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
+    if setup_complete(data) {
+        None
+    } else {
+        Some(json_response(428, json!({"error": "setup required"})))
+    }
+}
+
+fn is_valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.contains("..")
+        && email.chars().all(|c| !c.is_control() && !c.is_whitespace())
+}
+
+fn sanitize_setup_value(body: &Value, key: &str) -> AppResult<String> {
+    let value = body[key].as_str().unwrap_or("").trim();
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(format!("{key} is required and must be a safe short value").into());
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_logo_data_url(data_url: &str) -> AppResult<()> {
+    let Some((mime, payload)) = data_url.split_once(',') else {
+        return Err("logo must be a data URL".into());
+    };
+    if !matches!(
+        mime,
+        "data:image/png;base64" | "data:image/jpeg;base64" | "data:image/svg+xml;base64"
+    ) {
+        return Err("logo must be a PNG, JPEG, or SVG data URL".into());
+    }
+    if payload.len() > MAX_LOGO_BASE64_SIZE {
+        return Err("logo must be smaller than 256 KiB".into());
+    }
+    let decoded = general_purpose::STANDARD.decode(payload)?;
+    if decoded.len() > MAX_LOGO_BYTES {
+        return Err("logo must be smaller than 256 KiB".into());
+    }
+    Ok(())
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn render_ui(data: &Value) -> String {
     let manifest = manifest();
     let count = manifest["emulators"].as_array().map_or(0, Vec::len);
     let versions = manifest["policy"]["file_versions_to_keep"]
         .as_u64()
         .unwrap_or(5);
-    format!(
-        r#"<!doctype html>
+    let logo = data["settings"]["branding"]["logo_data_url"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                r#"<img class="mark logo-img" src="{}" alt="Crash Crafts Game Sync logo">"#,
+                escape_html(value)
+            )
+        })
+        .unwrap_or_else(|| r#"<span class="mark"></span>"#.to_owned());
+    let configured = setup_complete(data);
+    let setup_panel = if configured {
+        r#"<section class="card panel-grid" id="admin">
+  <div>
+    <p class="eyebrow">Admin</p>
+    <h2>Manage the Docker setup from the Web UI</h2>
+    <p>Log in with the setup admin account to create invites, update branding, and keep configuration inside the mounted Docker data volume instead of environment variables.</p>
+  </div>
+  <form id="login-form" class="form">
+    <label>Email<input name="email" type="email" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <label>2FA code<input name="totp_code" inputmode="numeric" required></label>
+    <button type="submit">Unlock admin panel</button>
+  </form>
+  <form id="logo-form" class="form hidden">
+    <label>Upload logo for web and OS app metadata<input name="logo" type="file" accept="image/png,image/jpeg,image/svg+xml" required></label>
+    <button type="submit">Save logo</button>
+  </form>
+  <p id="admin-result" class="result"></p>
+</section>"#
+            .to_owned()
+    } else {
+        r#"<section class="card panel-grid" id="setup">
+  <div>
+    <p class="eyebrow">First-run setup</p>
+    <h2>Configure the Docker after download</h2>
+    <p>Create the initial admin and store Office365 OAuth SMTP metadata in the Docker data volume. No Docker environment variables are required.</p>
+  </div>
+  <form id="setup-form" class="form">
+    <label>Admin email<input name="admin_email" type="email" autocomplete="username" required></label>
+    <label>Admin password<input name="admin_password" type="password" autocomplete="new-password" minlength="12" required></label>
+    <label>Office365 tenant ID<input name="smtp_tenant_id" autocomplete="off" required></label>
+    <label>Office365 OAuth client ID<input name="smtp_client_id" autocomplete="off" required></label>
+    <label>SMTP from email<input name="smtp_from_email" type="email" required></label>
+    <button type="submit">Complete secure setup</button>
+  </form>
+  <p id="setup-result" class="result"></p>
+</section>"#
+            .to_owned()
+    };
+    r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gcmgamesync</title>
+  <title>@APP@</title>
   <style>
-    :root {{ color-scheme: dark; --bg: #070a12; --panel: rgba(17, 24, 39, .82); --panel-strong: rgba(12, 18, 31, .94); --text: #f8fafc; --muted: #aab7cf; --brand: #ff7a1a; --brand-2: #22d3ee; --good: #7ee787; --border: rgba(255,255,255,.12); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    * {{ box-sizing: border-box; }} body {{ margin: 0; min-height: 100vh; color: var(--text); background: radial-gradient(circle at 18% 12%, rgba(255,122,26,.23), transparent 32rem), radial-gradient(circle at 82% 4%, rgba(34,211,238,.20), transparent 30rem), linear-gradient(135deg, #070a12 0%, #101827 48%, #070a12 100%); }}
-    .shell {{ width: min(1160px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0 56px; }} nav, .card, .stat, .feature {{ border: 1px solid var(--border); background: var(--panel); box-shadow: 0 24px 80px rgba(0,0,0,.35); backdrop-filter: blur(18px); border-radius: 24px; }}
-    nav {{ display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; }} .logo {{ display: flex; gap: 12px; align-items: center; font-weight: 800; letter-spacing: -.04em; }} .mark {{ width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: 0 0 32px rgba(255,122,26,.45); }} .pill {{ color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; font-size: .85rem; }}
-    .hero {{ display: grid; grid-template-columns: 1.2fr .8fr; gap: 24px; margin-top: 28px; }} .card {{ padding: clamp(28px, 5vw, 56px); }} h1 {{ font-size: clamp(2.4rem, 7vw, 5.7rem); line-height: .94; margin: 0 0 20px; letter-spacing: -.08em; }} h2 {{ margin: 0 0 12px; font-size: 1.25rem; }} p {{ color: var(--muted); line-height: 1.7; }} .accent {{ background: linear-gradient(90deg, var(--brand), var(--brand-2)); -webkit-background-clip: text; color: transparent; }} .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }} a.button {{ text-decoration: none; color: #071019; background: linear-gradient(135deg, var(--brand), #ffd166); padding: 13px 18px; border-radius: 14px; font-weight: 800; }} a.secondary {{ color: var(--text); background: rgba(255,255,255,.08); border: 1px solid var(--border); }}
-    .stats {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; height: 100%; }} .stat {{ padding: 22px; }} .value {{ display: block; font-size: 2rem; font-weight: 900; color: var(--good); }} .label {{ color: var(--muted); font-size: .95rem; }} .features {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px; }} .feature {{ padding: 22px; background: var(--panel-strong); }} code {{ color: var(--brand-2); }} @media (max-width: 820px) {{ .hero, .features {{ grid-template-columns: 1fr; }} .stats {{ grid-template-columns: 1fr 1fr; }} }}
+    :root { color-scheme: dark; --bg: #070a12; --panel: rgba(17, 24, 39, .82); --panel-strong: rgba(12, 18, 31, .94); --text: #f8fafc; --muted: #aab7cf; --brand: #ff7a1a; --brand-2: #22d3ee; --good: #7ee787; --border: rgba(255,255,255,.12); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; min-width: 0; } body { margin: 0; min-height: 100vh; color: var(--text); background: radial-gradient(circle at 18% 12%, rgba(255,122,26,.23), transparent 32rem), radial-gradient(circle at 82% 4%, rgba(34,211,238,.20), transparent 30rem), linear-gradient(135deg, #070a12 0%, #101827 48%, #070a12 100%); overflow-wrap: anywhere; }
+    .shell { width: min(1160px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0 56px; } nav, .card, .stat, .feature { border: 1px solid var(--border); background: var(--panel); box-shadow: 0 24px 80px rgba(0,0,0,.35); backdrop-filter: blur(18px); border-radius: 24px; }
+    nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; flex-wrap: wrap; } .logo { display: flex; gap: 12px; align-items: center; font-weight: 800; letter-spacing: -.04em; font-size: clamp(1rem, 3vw, 1.25rem); } .mark { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: 0 0 32px rgba(255,122,26,.45); object-fit: cover; } .pill { color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; font-size: .85rem; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr); gap: 24px; margin-top: 28px; } .card { padding: clamp(24px, 5vw, 52px); } h1 { font-size: clamp(2.2rem, 8vw, 5.2rem); line-height: 1; margin: 0 0 20px; letter-spacing: -.07em; max-width: 10ch; } h2 { margin: 0 0 12px; font-size: clamp(1.2rem, 3vw, 1.6rem); } p { color: var(--muted); line-height: 1.7; max-width: 68ch; } .accent { background: linear-gradient(90deg, var(--brand), var(--brand-2)); -webkit-background-clip: text; color: transparent; } .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; } a.button, button { text-decoration: none; color: #071019; background: linear-gradient(135deg, var(--brand), #ffd166); padding: 13px 18px; border-radius: 14px; font-weight: 800; border: 0; cursor: pointer; } a.secondary { color: var(--text); background: rgba(255,255,255,.08); border: 1px solid var(--border); }
+    .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; height: 100%; } .stat { padding: 22px; } .value { display: block; font-size: clamp(1.55rem, 4vw, 2rem); font-weight: 900; color: var(--good); } .label { color: var(--muted); font-size: .95rem; } .features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 20px; } .feature { padding: 22px; background: var(--panel-strong); } .panel-grid { display: grid; grid-template-columns: minmax(0, .85fr) minmax(280px, 1fr); gap: 22px; margin-top: 20px; align-items: start; } .form { display: grid; gap: 12px; } label { color: var(--muted); display: grid; gap: 7px; font-size: .9rem; } input { width: 100%; color: var(--text); background: rgba(255,255,255,.07); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; } .result { color: var(--good); } .eyebrow { margin: 0 0 8px; color: var(--brand-2); font-weight: 800; text-transform: uppercase; letter-spacing: .08em; } .hidden { display: none; } @media (max-width: 820px) { .hero, .features, .panel-grid { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } h1 { max-width: none; } } @media (max-width: 520px) { .stats { grid-template-columns: 1fr; } }
   </style>
 </head>
-<body><main class="shell"><nav><div class="logo"><span class="mark"></span><span>Gcmgamesync</span></div><span class="pill">Rust server + client scaffold</span></nav><section class="hero"><div class="card"><h1>Save sync for <span class="accent">every emulator rig.</span></h1><p>Docker-hosted Rust backup, five-copy version retention, TOTP-protected accounts, client logs, and device-local emulator configuration protection for Windows, Linux, and Steam Deck workflows.</p><div class="actions"><a class="button" href="/api/emulators">View emulator manifest</a><a class="button secondary" href="/api/health">Check server health</a></div></div><div class="stats"><div class="stat"><span class="value">{count}</span><span class="label">emulator profiles including Dolphin dev</span></div><div class="stat"><span class="value">{versions}</span><span class="label">total copies retained per changed file</span></div><div class="stat"><span class="value">2FA</span><span class="label">required registration/login model</span></div><div class="stat"><span class="value">OS</span><span class="label">aware update metadata</span></div></div></section><section class="features"><div class="feature"><h2>Portable-first</h2><p>Client detection checks portable markers before sync so each emulator can keep saves isolated and predictable.</p></div><div class="feature"><h2>Config-safe</h2><p>Manifest exclusions keep controllers, paths, graphics, and other user configuration local to each device.</p></div><div class="feature"><h2>Admin-ready</h2><p>Admin APIs bootstrap invites, users, logs, and future server-managed emulator updates.</p></div></section></main></body></html>"#
-    )
+<body><main class="shell"><nav><div class="logo">@LOGO@<span>@APP@</span></div><span class="pill">Docker Web UI setup</span></nav><section class="hero"><div class="card"><h1>Save sync for <span class="accent">every emulator rig.</span></h1><p>Docker-hosted backup with Web UI setup, five-copy version retention, TOTP-protected accounts, Office365 OAuth SMTP metadata, and device-local emulator configuration protection.</p><div class="actions"><a class="button" href="/api/emulators">View emulator manifest</a><a class="button secondary" href="/api/health">Check server health</a></div></div><div class="stats"><div class="stat"><span class="value">@COUNT@</span><span class="label">emulator profiles reviewed for Docker setup</span></div><div class="stat"><span class="value">@VERSIONS@</span><span class="label">total copies retained per changed file</span></div><div class="stat"><span class="value">2FA</span><span class="label">required admin login model</span></div><div class="stat"><span class="value">OAuth</span><span class="label">Office365 SMTP setup fields</span></div></div></section>@SETUP@<section class="features"><div class="feature"><h2>No Docker env required</h2><p>Initial admin, SMTP, and branding settings are configured after startup through the Web UI and persisted under /data.</p></div><div class="feature"><h2>Config-safe</h2><p>Manifest exclusions keep controllers, paths, graphics, and other user configuration local to each device.</p></div><div class="feature"><h2>Security-aware</h2><p>Use HTTPS at the reverse proxy for transit security; stored app state is written with restrictive file permissions where supported.</p></div></section></main><script>
+const result = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+const token = () => localStorage.getItem('ccgs_token') || '';
+document.getElementById('setup-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target));
+  const response = await fetch('/api/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const body = await response.json();
+  result('setup-result', response.ok ? `Setup complete. Add this TOTP URI to your authenticator: ${body.otpauth_uri}` : body.error);
+});
+document.getElementById('login-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target));
+  const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const body = await response.json();
+  if (response.ok && body.is_admin) { localStorage.setItem('ccgs_token', body.token); document.getElementById('logo-form')?.classList.remove('hidden'); result('admin-result', 'Admin unlocked.'); } else { result('admin-result', body.error || 'Admin login required.'); }
+});
+document.getElementById('logo-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const file = event.target.logo.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const response = await fetch('/api/admin/logo', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token()}` }, body: JSON.stringify({ data_url: reader.result }) });
+    const body = await response.json();
+    result('admin-result', response.ok ? 'Logo saved. Refresh to preview it.' : body.error);
+  };
+  reader.readAsDataURL(file);
+});
+</script></body></html>"#
+        .replace("@APP@", APP_NAME)
+        .replace("@LOGO@", &logo)
+        .replace("@COUNT@", &count.to_string())
+        .replace("@VERSIONS@", &versions.to_string())
+        .replace("@SETUP@", &setup_panel)
 }
 
 fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -343,6 +569,19 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<std::io:
     let mut response = Response::from_data(body).with_status_code(StatusCode(status));
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
         response.add_header(header);
+    }
+    for (name, value) in [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        (
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    ] {
+        if let Ok(header) = Header::from_bytes(name, value) {
+            response.add_header(header);
+        }
     }
     response
 }
@@ -388,14 +627,92 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
     let raw_url = request.url().to_owned();
     let path = raw_url.split('?').next().unwrap_or(&raw_url).to_owned();
     let result: AppResult<Response<std::io::Cursor<Vec<u8>>>> = (|| match (method, path.as_str()) {
-        (Method::Get, "/") => Ok(response(
-            200,
-            render_ui().into_bytes(),
-            "text/html; charset=utf-8",
-        )),
-        (Method::Get, "/api/health") => Ok(json_response(200, json!({"ok": true}))),
+        (Method::Get, "/") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            Ok(response(
+                200,
+                render_ui(&data).into_bytes(),
+                "text/html; charset=utf-8",
+            ))
+        }
+        (Method::Get, "/api/health") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            Ok(json_response(
+                200,
+                json!({"ok": true, "setup_complete": setup_complete(&data)}),
+            ))
+        }
+        (Method::Get, "/api/config") => {
+            let store = state.store.lock().unwrap();
+            Ok(json_response(200, public_config(&store.read()?)))
+        }
         (Method::Get, "/api/emulators") => Ok(json_response(200, manifest())),
+        (Method::Post, "/api/setup") => {
+            let body = read_body(&mut request)?;
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if setup_complete(&data) {
+                return Ok(json_response(
+                    409,
+                    json!({"error": "setup already complete"}),
+                ));
+            }
+            let email = sanitize_setup_value(&body, "admin_email")?.to_lowercase();
+            if !is_valid_email(&email) {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "valid admin_email required"}),
+                ));
+            }
+            let password = body["admin_password"].as_str().unwrap_or_default();
+            if password.len() < 12 {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "admin_password must be at least 12 characters"}),
+                ));
+            }
+            let smtp_tenant_id = sanitize_setup_value(&body, "smtp_tenant_id")?;
+            let smtp_client_id = sanitize_setup_value(&body, "smtp_client_id")?;
+            let smtp_from_email = sanitize_setup_value(&body, "smtp_from_email")?.to_lowercase();
+            if !is_valid_email(&smtp_from_email) {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "valid smtp_from_email required"}),
+                ));
+            }
+            let secret = new_totp_secret();
+            data["users"][&email] = json!({
+                "email": email,
+                "password_hash": hash_password(password, None),
+                "totp_secret": secret,
+                "is_admin": true,
+                "registered": true
+            });
+            data["settings"]["smtp"] = json!({
+                "provider": "office365",
+                "auth": "oauth2",
+                "tenant_id": smtp_tenant_id,
+                "client_id": smtp_client_id,
+                "from_email": smtp_from_email,
+                "token_status": "authorization_pending"
+            });
+            data["setup_complete"] = json!(true);
+            let otpauth = otpauth_uri(&email, &secret);
+            store.write(&data)?;
+            Ok(json_response(
+                201,
+                json!({"ok": true, "email": email, "otpauth_uri": otpauth}),
+            ))
+        }
         (Method::Get, "/api/users") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let Some(user) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -421,7 +738,38 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 .collect::<Vec<_>>();
             Ok(json_response(200, json!({"users": users})))
         }
+        (Method::Post, "/api/admin/logo") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let body = read_body(&mut request)?;
+            let data_url = body["data_url"].as_str().unwrap_or("").trim();
+            validate_logo_data_url(data_url)?;
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            data["settings"]["branding"]["logo_data_url"] = json!(data_url);
+            store.write(&data)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
         (Method::Post, "/api/invites") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let Some(user) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -447,6 +795,12 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             ))
         }
         (Method::Post, "/api/register") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let body = read_body(&mut request)?;
             let invite_token = body["invite_token"].as_str().unwrap_or("");
             let password = body["password"].as_str().unwrap_or_default();
@@ -476,6 +830,12 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             ))
         }
         (Method::Post, "/api/login") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let body = read_body(&mut request)?;
             let email = body["email"].as_str().unwrap_or("").trim().to_lowercase();
             let store = state.store.lock().unwrap();
@@ -511,6 +871,12 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             ))
         }
         (Method::Post, "/api/logs") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let Some(user) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -529,6 +895,12 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             Ok(json_response(201, json!({"ok": true})))
         }
         (Method::Put, path) if path.starts_with("/api/files/") => {
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if let Some(response) = require_setup_complete(&data) {
+                return Ok(response);
+            }
+            drop(store);
             let Some(user) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -556,16 +928,23 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
     let _ = request.respond(response);
 }
 
-fn run_server() -> AppResult<()> {
-    let data_dir = PathBuf::from(env::var("GCM_DATA_DIR").unwrap_or_else(|_| "/data".to_owned()));
-    let host = env::var("GCM_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
-    let port = env::var("GCM_PORT").unwrap_or_else(|_| "8080".to_owned());
+fn optional_arg_value(args: &[String], name: &str, fallback: &str) -> String {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].clone())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn run_server(args: &[String]) -> AppResult<()> {
+    let data_dir = PathBuf::from(optional_arg_value(args, "--data-dir", "/data"));
+    let host = optional_arg_value(args, "--host", "127.0.0.1");
+    let port = optional_arg_value(args, "--port", "8080");
     let server = Server::http(format!("{host}:{port}"))?;
     let state = Arc::new(AppState {
         data_dir: data_dir.clone(),
         store: Mutex::new(bootstrap_store(&data_dir)?),
     });
-    println!("Gcmgamesync server listening on http://{host}:{port}");
+    println!("{APP_NAME} server listening on http://{host}:{port}");
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
         std::thread::spawn(move || handle_request(request, state));
@@ -610,7 +989,7 @@ fn cmd_upload_log(args: &[String]) -> AppResult<()> {
     let mut response = ureq::post(&format!("{server}/api/logs"))
         .header("Authorization", &format!("Bearer {token}"))
         .send_json(
-            json!({"level": level, "message": message, "context": {"client": "gcmgamesync-cli"}}),
+            json!({"level": level, "message": message, "context": {"client": "crash-crafts-game-sync-cli"}}),
         )?
         .into_body();
     let result: Value = response.read_json()?;
@@ -618,21 +997,38 @@ fn cmd_upload_log(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_healthcheck(args: &[String]) -> AppResult<()> {
+    let url = args
+        .windows(2)
+        .find(|window| window[0] == "--url")
+        .map(|window| window[1].clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8080/api/health".to_owned());
+    let mut response = ureq::get(validate_server_url(&url)?).call()?.into_body();
+    let result: Value = response.read_json()?;
+    if result["ok"].as_bool() == Some(true) {
+        println!("OK");
+        Ok(())
+    } else {
+        Err("healthcheck endpoint did not report ok".into())
+    }
+}
+
 fn print_usage() {
     eprintln!(
         "usage:
-  gcmgamesync server
-  gcmgamesync manifest
-  gcmgamesync scan --root <path>
-  gcmgamesync status --root <path>
-  gcmgamesync upload-log --server <url> --token <token> [--level info] <message>"
+   crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
+   crash-crafts-game-sync manifest
+   crash-crafts-game-sync scan --root <path>
+   crash-crafts-game-sync status --root <path>
+   crash-crafts-game-sync upload-log --server <url> --token <token> [--level info] <message>
+   crash-crafts-game-sync healthcheck [--url http://127.0.0.1:8080/api/health]"
     );
 }
 
 fn main() -> AppResult<()> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str).unwrap_or("server") {
-        "server" => run_server(),
+        "server" => run_server(&args),
         "manifest" => {
             println!("{}", serde_json::to_string_pretty(&manifest())?);
             Ok(())
@@ -668,6 +1064,7 @@ fn main() -> AppResult<()> {
             }
         }
         "upload-log" => cmd_upload_log(&args),
+        "healthcheck" => cmd_healthcheck(&args),
         _ => {
             print_usage();
             std::process::exit(2);
@@ -772,5 +1169,35 @@ mod tests {
         let secret = new_totp_secret();
         let code = totp(&secret, 123456).unwrap();
         assert!(verify_totp(&secret, &code, Some(123456 * 30), 0));
+    }
+
+    #[test]
+    fn new_store_starts_unconfigured_with_app_name() {
+        let temp = TempDir::new().unwrap();
+        let store = JsonStore::new(temp.path().join("state.json")).unwrap();
+        let data = store.read().unwrap();
+        assert_eq!(data["setup_complete"], false);
+        assert_eq!(data["settings"]["app_name"], APP_NAME);
+    }
+
+    #[test]
+    fn logo_upload_accepts_small_images_only() {
+        let payload = general_purpose::STANDARD.encode([0_u8; 8]);
+        assert!(validate_logo_data_url(&format!("data:image/png;base64,{payload}")).is_ok());
+        assert!(validate_logo_data_url("data:text/html;base64,PGgxPm5vPC9oMT4=").is_err());
+        let large = general_purpose::STANDARD.encode(vec![0_u8; 262_145]);
+        assert!(validate_logo_data_url(&format!("data:image/png;base64,{large}")).is_err());
+    }
+
+    #[test]
+    fn ui_uses_crash_crafts_branding_and_setup_panel() {
+        let data = json!({
+            "setup_complete": false,
+            "settings": {"branding": {}, "smtp": {}, "app_name": APP_NAME}
+        });
+        let html = render_ui(&data);
+        assert!(html.contains(APP_NAME));
+        assert!(html.contains("First-run setup"));
+        assert!(html.contains("Office365"));
     }
 }
