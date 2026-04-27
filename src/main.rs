@@ -252,7 +252,11 @@ fn write_versioned_file(
     fs::create_dir_all(base.parent().ok_or("file path must include a parent")?)?;
     fs::create_dir_all(&version_dir)?;
 
-    let changed = !base.exists() || fs::read(&base)? != content;
+    let changed = if base.exists() {
+        fs::read(&base)? != content
+    } else {
+        true
+    };
     if changed && base.exists() {
         let version_name = format!(
             "{}-{}",
@@ -445,7 +449,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
         (Method::Post, "/api/register") => {
             let body = read_body(&mut request)?;
             let invite_token = body["invite_token"].as_str().unwrap_or("");
-            let password = body["password"].as_str().unwrap_or("");
+            let password = body["password"].as_str().unwrap_or_default();
             if password.len() < 12 {
                 return Ok(json_response(
                     400,
@@ -462,9 +466,9 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             };
             let secret = new_totp_secret();
             data["users"][&email] = json!({"email": email, "password_hash": hash_password(password, None), "totp_secret": secret, "is_admin": false, "registered": true});
-            data["invites"]
-                .as_object_mut()
-                .map(|invites| invites.remove(invite_token));
+            if let Some(invites) = data["invites"].as_object_mut() {
+                invites.remove(invite_token);
+            }
             store.write(&data)?;
             Ok(json_response(
                 201,
@@ -477,13 +481,13 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let store = state.store.lock().unwrap();
             let mut data = store.read()?;
             let user = data["users"].get(&email).cloned();
-            let dummy = hash_password("invalid-password-placeholder", None);
+            let dummy = hash_password(&new_token(), None);
             let password_hash = user
                 .as_ref()
                 .and_then(|user| user["password_hash"].as_str())
                 .unwrap_or(&dummy);
             let password_ok =
-                verify_password(body["password"].as_str().unwrap_or(""), password_hash);
+                verify_password(body["password"].as_str().unwrap_or_default(), password_hash);
             let totp_ok = user.as_ref().is_some_and(|user| {
                 verify_totp(
                     user["totp_secret"].as_str().unwrap_or(""),
