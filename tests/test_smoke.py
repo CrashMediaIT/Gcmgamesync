@@ -39,6 +39,7 @@ class GcmSmokeTests(unittest.TestCase):
             for index in range(2, 9):
                 write_versioned_file(root, "u@example.com", "saves/a.sav", str(index).encode())
             versions = list((root / "versions" / "u@example.com" / "saves" / "a.sav").iterdir())
+            # Five total copies means four historical versions plus the current file.
             self.assertEqual(len(versions), 4)
 
     def test_client_requires_https_except_localhost(self):

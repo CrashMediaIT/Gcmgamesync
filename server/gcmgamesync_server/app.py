@@ -93,8 +93,8 @@ UI_HTML = """<!doctype html>
         </div>
       </div>
       <div class="stats">
-        <div class="stat"><span class="value">9</span><span class="label">emulator profiles including Dolphin dev</span></div>
-        <div class="stat"><span class="value">5</span><span class="label">total copies retained per changed file</span></div>
+        <div class="stat"><span class="value">{{emulator_count}}</span><span class="label">emulator profiles including Dolphin dev</span></div>
+        <div class="stat"><span class="value">{{versions_to_keep}}</span><span class="label">total copies retained per changed file</span></div>
         <div class="stat"><span class="value">2FA</span><span class="label">required registration/login model</span></div>
         <div class="stat"><span class="value">OS</span><span class="label">aware update metadata</span></div>
       </div>
@@ -107,6 +107,13 @@ UI_HTML = """<!doctype html>
   </main>
 </body>
 </html>"""
+
+
+def render_ui() -> str:
+    return (
+        UI_HTML.replace("{{emulator_count}}", str(len(MANIFEST["emulators"])))
+        .replace("{{versions_to_keep}}", str(MANIFEST["policy"]["file_versions_to_keep"]))
+    )
 
 
 def bootstrap_store(data_dir: Path) -> JsonStore:
@@ -181,7 +188,7 @@ class GcmHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send(HTTPStatus.OK, UI_HTML.encode(), "text/html; charset=utf-8")
+            self._send(HTTPStatus.OK, render_ui().encode(), "text/html; charset=utf-8")
         elif parsed.path == "/api/health":
             self._send(HTTPStatus.OK, {"ok": True})
         elif parsed.path == "/api/emulators":
