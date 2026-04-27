@@ -1,6 +1,5 @@
 use base64::{Engine, engine::general_purpose};
 use data_encoding::BASE32_NOPAD;
-use glob::Pattern;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::{RngCore, rngs::OsRng};
@@ -69,7 +68,9 @@ fn detect_emulators(root: &Path) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(test)]
 fn should_sync(relative_path: &str, emulator: &Value) -> bool {
+    use glob::Pattern;
     let normalized = relative_path.replace('\\', "/");
     let matches = |key: &str| {
         emulator[key]
@@ -576,8 +577,11 @@ fn validate_server_url(server: &str) -> AppResult<&str> {
         return Ok(server);
     }
     if let Some(host) = server.strip_prefix("http://") {
+        if host.starts_with("[::1]") {
+            return Ok(server);
+        }
         let host = host.split(['/', ':']).next().unwrap_or("");
-        if matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        if matches!(host, "localhost" | "127.0.0.1") {
             return Ok(server);
         }
     }

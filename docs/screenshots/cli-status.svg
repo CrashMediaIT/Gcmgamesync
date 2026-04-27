@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+  <title id="title">Gcmgamesync CLI status screenshot</title>
+  <desc id="desc">Terminal output from the Rust CLI status command.</desc>
+  <rect width="1200" height="540" rx="0" fill="#070a12"/>
+  <rect x="72" y="54" width="1056" height="432" rx="22" fill="#0c121f" stroke="#ffffff" stroke-opacity=".14"/>
+  <rect x="72" y="54" width="1056" height="54" rx="22" fill="#111827"/>
+  <circle cx="105" cy="81" r="8" fill="#ff5f56"/>
+  <circle cx="132" cy="81" r="8" fill="#ffbd2e"/>
+  <circle cx="159" cy="81" r="8" fill="#27c93f"/>
+  <text x="198" y="87" fill="#aab7cf" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">cargo run -- status --root /games/emulators</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+    <text x="112" y="150" fill="#22d3ee">{</text>
+    <text x="146" y="186" fill="#f8fafc">"detected": [</text>
+    <text x="182" y="222" fill="#f8fafc">{ "id": "duckstation", "name": "DuckStation",</text>
+    <text x="218" y="258" fill="#aab7cf">"path": "/games/emulators/DuckStation",</text>
+    <text x="218" y="294" fill="#7ee787">"portable": true,</text>
+    <text x="218" y="330" fill="#aab7cf">"update_policy": { "source": "github" }</text>
+    <text x="182" y="366" fill="#f8fafc">}</text>
+    <text x="146" y="402" fill="#f8fafc">], "errors": [], "portable_mode_required": []</text>
+    <text x="112" y="438" fill="#22d3ee">}</text>
+  </g>
+</svg>

@@ -1,6 +1,12 @@
 # Gcmgamesync
 
-Gcmgamesync is an emulator save backup and synchronization platform. The initial MVP in this repository provides a Docker-hosted server, a Python desktop-client scaffold for Windows/Linux, and a shared emulator manifest that defines save-data sync rules while excluding device-local configuration.
+Gcmgamesync is an emulator save backup and synchronization platform. The MVP in this repository is now implemented in Rust and provides a Docker-hosted server, a cross-platform CLI client scaffold for Windows/Linux, and a shared emulator manifest that defines save-data sync rules while excluding device-local configuration.
+
+## Screenshots
+
+![Gcmgamesync web UI](docs/screenshots/server-ui.svg)
+
+![Gcmgamesync CLI status output](docs/screenshots/cli-status.svg)
 
 ## Goals
 
@@ -25,15 +31,15 @@ The server root (`/`) includes a modern dark, glass-style UI with orange and cya
 ## Run without Docker
 
 ```bash
-PYTHONPATH=server:client GCM_DATA_DIR=/tmp/gcmgamesync-data GCM_ADMIN_EMAIL=admin@example.com GCM_ADMIN_PASSWORD='change-this-admin-password' python3 -m gcmgamesync_server
+GCM_DATA_DIR=/tmp/gcmgamesync-data GCM_ADMIN_EMAIL=admin@example.com GCM_ADMIN_PASSWORD='change-this-admin-password' cargo run -- server
 ```
 
 ## Client MVP
 
 ```bash
-PYTHONPATH=server:client python3 -m gcmgamesync_client manifest
-PYTHONPATH=server:client python3 -m gcmgamesync_client scan --root /path/to/emulators
-PYTHONPATH=server:client python3 -m gcmgamesync_client status --root /path/to/emulators
+cargo run -- manifest
+cargo run -- scan --root /path/to/emulators
+cargo run -- status --root /path/to/emulators
 ```
 
 ## HTTP API MVP
