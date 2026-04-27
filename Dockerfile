@@ -7,9 +7,15 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 WORKDIR /app
-COPY --from=builder /app/target/release/gcmgamesync /usr/local/bin/gcmgamesync
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin ccgs \
+    && mkdir -p /data \
+    && chown -R ccgs:ccgs /data
+COPY --from=builder /app/target/release/crash-crafts-game-sync /usr/local/bin/crash-crafts-game-sync
 COPY shared ./shared
-ENV GCM_DATA_DIR=/data GCM_HOST=0.0.0.0 GCM_PORT=8080
+USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 8080
-CMD ["gcmgamesync", "server"]
+CMD ["crash-crafts-game-sync", "server"]
