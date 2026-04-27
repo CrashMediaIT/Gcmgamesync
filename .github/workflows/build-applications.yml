@@ -38,16 +38,25 @@ jobs:
           set -eux
           ./target/release/crash-crafts-game-sync-gui --port 17835 --no-browser --config /tmp/desktop-config.json &
           GUI_PID=$!
-          # Give the server a moment to bind.
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -fsS http://127.0.0.1:17835/api/local/status >/dev/null 2>&1; then
-              break
-            fi
+          # The GUI server writes its per-process bearer token to the hint
+          # file immediately after binding, before accepting requests.
+          # Wait for the file to appear (proves the server is ready).
+          TOKEN_FILE="${HOME}/.local/state/crash-crafts-game-sync/gui-token"
+          for i in $(seq 1 20); do
+            if [ -s "$TOKEN_FILE" ]; then break; fi
             sleep 0.5
           done
-          curl -fsS http://127.0.0.1:17835/api/local/status
-          curl -fsS http://127.0.0.1:17835/api/local/emulators >/dev/null
+          if [ ! -s "$TOKEN_FILE" ]; then
+            echo "GUI server did not start in time" >&2
+            kill "$GUI_PID" || true
+            exit 1
+          fi
+          LOCAL_TOKEN="$(cat "$TOKEN_FILE")"
+          # Unauthenticated requests: only static assets are public.
           curl -fsS http://127.0.0.1:17835/ >/dev/null
+          # Authenticated API requests.
+          curl -fsS -H "Authorization: Bearer ${LOCAL_TOKEN}" http://127.0.0.1:17835/api/local/status
+          curl -fsS -H "Authorization: Bearer ${LOCAL_TOKEN}" http://127.0.0.1:17835/api/local/emulators >/dev/null
           kill "$GUI_PID"
 
       - name: Install Linux packaging tools
