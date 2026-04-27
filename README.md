@@ -6,7 +6,7 @@ Crash Crafts Game Sync is an emulator save backup and synchronization platform. 
 
 ![Crash Crafts Game Sync web UI](docs/screenshots/server-ui.svg)
 
-![Crash Crafts Game Sync CLI status output](docs/screenshots/cli-status.svg)
+![Crash Crafts Game Sync Docker pull and CLI output](docs/screenshots/cli-status.svg)
 
 ## Goals
 
@@ -20,6 +20,12 @@ Crash Crafts Game Sync is an emulator save backup and synchronization platform. 
 
 ```bash
 docker compose up --build
+```
+
+To pre-pull the published image instead of building locally:
+
+```bash
+docker pull ghcr.io/crashmediait/gcmgamesync:latest
 ```
 
 Open <http://localhost:8080> and complete the first-run setup page. The initial admin account, TOTP secret, Office365 OAuth SMTP metadata, and uploaded logo are stored in the Docker volume at `/data`; no Docker environment variables are required.

@@ -1005,7 +1005,7 @@ fn cmd_healthcheck(args: &[String]) -> AppResult<()> {
         .unwrap_or_else(|| "http://127.0.0.1:8080/api/health".to_owned());
     let mut response = ureq::get(validate_server_url(&url)?).call()?.into_body();
     let result: Value = response.read_json()?;
-    if result["status"] == "ok" {
+    if result["ok"].as_bool() == Some(true) {
         Ok(())
     } else {
         Err("healthcheck endpoint did not report ok".into())
