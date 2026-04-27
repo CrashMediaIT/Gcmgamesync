@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Gcmgamesync web UI screenshot</title>
+  <desc id="desc">Dark neon web dashboard for the Rust Gcmgamesync server.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#070a12"/>
+      <stop offset=".5" stop-color="#101827"/>
+      <stop offset="1" stop-color="#070a12"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop stop-color="#ff7a1a"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1200" height="720" fill="url(#bg)"/>
+  <circle cx="190" cy="110" r="240" fill="#ff7a1a" opacity=".2"/>
+  <circle cx="1010" cy="80" r="250" fill="#22d3ee" opacity=".18"/>
+  <rect x="80" y="58" width="1040" height="70" rx="24" fill="#111827" opacity=".82" stroke="#ffffff" stroke-opacity=".14"/>
+  <rect x="108" y="75" width="38" height="38" rx="12" fill="url(#accent)" filter="url(#glow)"/>
+  <text x="162" y="101" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800">Gcmgamesync</text>
+  <rect x="812" y="77" width="278" height="32" rx="16" fill="none" stroke="#ffffff" stroke-opacity=".16"/>
+  <text x="834" y="99" fill="#aab7cf" font-family="Inter, Arial, sans-serif" font-size="16">Rust server + client scaffold</text>
+  <rect x="80" y="160" width="650" height="360" rx="28" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
+  <text x="122" y="245" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="74" font-weight="900">Save sync for</text>
+  <text x="122" y="330" fill="url(#accent)" font-family="Inter, Arial, sans-serif" font-size="74" font-weight="900">every emulator rig.</text>
+  <text x="124" y="386" fill="#aab7cf" font-family="Inter, Arial, sans-serif" font-size="20">Docker-hosted Rust backup, five-copy version retention,</text>
+  <text x="124" y="418" fill="#aab7cf" font-family="Inter, Arial, sans-serif" font-size="20">TOTP accounts, logs, and config-safe emulator sync.</text>
+  <rect x="124" y="458" width="205" height="48" rx="14" fill="#ff7a1a"/>
+  <text x="148" y="489" fill="#071019" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="800">View emulator manifest</text>
+  <rect x="348" y="458" width="172" height="48" rx="14" fill="#ffffff" opacity=".08" stroke="#ffffff" stroke-opacity=".16"/>
+  <text x="373" y="489" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="800">Check server health</text>
+  <g font-family="Inter, Arial, sans-serif">
+    <rect x="758" y="160" width="170" height="168" rx="24" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="790" y="228" fill="#7ee787" font-size="54" font-weight="900">9</text>
+    <text x="790" y="266" fill="#aab7cf" font-size="16">emulator profiles</text>
+    <rect x="950" y="160" width="170" height="168" rx="24" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="982" y="228" fill="#7ee787" font-size="54" font-weight="900">5</text>
+    <text x="982" y="266" fill="#aab7cf" font-size="16">copies retained</text>
+    <rect x="758" y="352" width="170" height="168" rx="24" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="790" y="420" fill="#7ee787" font-size="54" font-weight="900">2FA</text>
+    <text x="790" y="458" fill="#aab7cf" font-size="16">required login</text>
+    <rect x="950" y="352" width="170" height="168" rx="24" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="982" y="420" fill="#7ee787" font-size="54" font-weight="900">OS</text>
+    <text x="982" y="458" fill="#aab7cf" font-size="16">aware updates</text>
+  </g>
+  <g font-family="Inter, Arial, sans-serif">
+    <rect x="80" y="548" width="326" height="104" rx="24" fill="#0c121f" opacity=".94" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="110" y="590" fill="#f8fafc" font-size="22" font-weight="800">Portable-first</text>
+    <text x="110" y="622" fill="#aab7cf" font-size="16">Checks portable markers before sync.</text>
+    <rect x="437" y="548" width="326" height="104" rx="24" fill="#0c121f" opacity=".94" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="467" y="590" fill="#f8fafc" font-size="22" font-weight="800">Config-safe</text>
+    <text x="467" y="622" fill="#aab7cf" font-size="16">Keeps device-local settings local.</text>
+    <rect x="794" y="548" width="326" height="104" rx="24" fill="#0c121f" opacity=".94" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="824" y="590" fill="#f8fafc" font-size="22" font-weight="800">Admin-ready</text>
+    <text x="824" y="622" fill="#aab7cf" font-size="16">Invites, users, logs, and updates.</text>
+  </g>
+</svg>
