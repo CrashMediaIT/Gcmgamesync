@@ -1,0 +1,59 @@
+name: Build applications
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact: crash-crafts-game-sync-linux-x86_64
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: crash-crafts-game-sync-windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/linux-packaging
+          cp target/release/crash-crafts-game-sync dist/
+          cp packaging/linux/* dist/linux-packaging/
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\windows-packaging -Force | Out-Null
+          Copy-Item target\release\crash-crafts-game-sync.exe dist\
+          Copy-Item packaging\windows\Product.wxs dist\windows-packaging\
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+          if-no-files-found: error
