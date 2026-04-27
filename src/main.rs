@@ -102,6 +102,8 @@ struct DesktopConfig {
 struct SyncRoot {
     emulator_id: String,
     path: String,
+    #[serde(default)]
+    emulator_executable: String,
     remote_prefix: String,
     pull_paths: Vec<String>,
 }
@@ -146,21 +148,27 @@ impl Default for DesktopConfig {
     }
 }
 
-fn default_desktop_config_path() -> PathBuf {
+fn default_desktop_config_path() -> AppResult<PathBuf> {
     if cfg!(windows) {
-        env::var_os("APPDATA")
+        let base = env::var_os("APPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+            })
+            .ok_or("APPDATA or USERPROFILE is required to choose a desktop config path")?;
+        Ok(base
             .join("CrashCrafts")
             .join("GameSync")
-            .join("desktop-config.json")
+            .join("desktop-config.json"))
     } else {
-        env::var_os("XDG_CONFIG_HOME")
+        let base = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .unwrap_or_else(|| PathBuf::from("."))
+            .ok_or("XDG_CONFIG_HOME or HOME is required to choose a desktop config path")?;
+        Ok(base
             .join("crash-crafts-game-sync")
-            .join("desktop-config.json")
+            .join("desktop-config.json"))
     }
 }
 
@@ -331,7 +339,8 @@ fn srm_parser_presets(config: &DesktopConfig) -> Value {
                 "configTitle": format!("Crash Crafts - {}", emulator["name"].as_str().unwrap_or(&sync_root.emulator_id)),
                 "steamCategory": format!("Crash Crafts/{}", emulator["name"].as_str().unwrap_or(&sync_root.emulator_id)),
                 "romDirectory": if config.srm.roms_directory.is_empty() { &sync_root.path } else { &config.srm.roms_directory },
-                "executable": sync_root.path,
+                "executable": sync_root.emulator_executable,
+                "requiresExecutableSelection": sync_root.emulator_executable.is_empty(),
                 "startInDirectory": sync_root.path,
                 "titleModifier": "${fuzzyTitle}",
                 "imageProviders": ["SteamGridDB"],
@@ -1316,10 +1325,12 @@ fn cmd_healthcheck(args: &[String]) -> AppResult<()> {
     }
 }
 
-fn config_path_from_args(args: &[String]) -> PathBuf {
-    args.windows(2)
+fn config_path_from_args(args: &[String]) -> AppResult<PathBuf> {
+    let mut arg_pairs = args.windows(2);
+    arg_pairs
         .find(|window| window[0] == "--config")
         .map(|window| PathBuf::from(&window[1]))
+        .map(Ok)
         .unwrap_or_else(default_desktop_config_path)
 }
 
@@ -1331,7 +1342,7 @@ fn all_arg_values(args: &[String], name: &str) -> Vec<String> {
 }
 
 fn cmd_desktop_config(args: &[String]) -> AppResult<()> {
-    let path = config_path_from_args(args);
+    let path = config_path_from_args(args)?;
     let config = if path.exists() {
         read_desktop_config(&path)?
     } else {
@@ -1342,7 +1353,7 @@ fn cmd_desktop_config(args: &[String]) -> AppResult<()> {
 }
 
 fn cmd_setup_desktop(args: &[String]) -> AppResult<()> {
-    let path = config_path_from_args(args);
+    let path = config_path_from_args(args)?;
     let mut config = if path.exists() {
         read_desktop_config(&path)?
     } else {
@@ -1371,6 +1382,7 @@ fn cmd_setup_desktop(args: &[String]) -> AppResult<()> {
                     remote_prefix: emulator_id.clone(),
                     emulator_id,
                     path,
+                    emulator_executable: String::new(),
                     pull_paths: Vec::new(),
                 })
             })
@@ -1401,11 +1413,12 @@ fn cmd_setup_desktop(args: &[String]) -> AppResult<()> {
 }
 
 fn cmd_daemon(args: &[String]) -> AppResult<()> {
-    let path = config_path_from_args(args);
+    let path = config_path_from_args(args)?;
     let config = read_desktop_config(&path)?;
-    let interval_seconds = optional_arg_value(args, "--interval-seconds", "60")
+    let interval_arg = optional_arg_value(args, "--interval-seconds", "60");
+    let interval_seconds = interval_arg
         .parse::<u64>()
-        .unwrap_or(60)
+        .map_err(|_| "--interval-seconds must be a positive integer")?
         .max(5);
     loop {
         let result = run_desktop_sync_once(&config)?;
@@ -1418,7 +1431,7 @@ fn cmd_daemon(args: &[String]) -> AppResult<()> {
 }
 
 fn cmd_generate_srm(args: &[String]) -> AppResult<()> {
-    let path = config_path_from_args(args);
+    let path = config_path_from_args(args)?;
     let config = read_desktop_config(&path)?;
     let output = write_srm_parsers(&config)?;
     println!(
@@ -1634,6 +1647,7 @@ mod tests {
             sync_roots: vec![SyncRoot {
                 emulator_id: "duckstation".to_owned(),
                 path: "/games/emulators/DuckStation".to_owned(),
+                emulator_executable: "/games/emulators/DuckStation/duckstation".to_owned(),
                 remote_prefix: "duckstation".to_owned(),
                 pull_paths: vec!["memcards/card.mcd".to_owned()],
             }],
@@ -1669,6 +1683,7 @@ mod tests {
             sync_roots: vec![SyncRoot {
                 emulator_id: "dolphin-dev".to_owned(),
                 path: "/games/emulators/Dolphin".to_owned(),
+                emulator_executable: "/games/emulators/Dolphin/dolphin-emu".to_owned(),
                 remote_prefix: "dolphin-dev".to_owned(),
                 pull_paths: Vec::new(),
             }],
@@ -1677,6 +1692,10 @@ mod tests {
         let presets = srm_parser_presets(&config);
         assert_eq!(presets["parsers"].as_array().unwrap().len(), 1);
         assert_eq!(presets["parsers"][0]["romDirectory"], "/games/roms");
+        assert_eq!(
+            presets["parsers"][0]["executable"],
+            "/games/emulators/Dolphin/dolphin-emu"
+        );
         assert!(
             presets["parsers"][0]["configTitle"]
                 .as_str()
