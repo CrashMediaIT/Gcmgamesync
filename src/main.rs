@@ -72,7 +72,6 @@ fn detect_emulators(root: &Path) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(test)]
 fn should_sync(relative_path: &str, emulator: &Value) -> bool {
     use glob::Pattern;
     let normalized = relative_path.replace('\\', "/");
@@ -1629,15 +1628,17 @@ mod tests {
     fn desktop_config_round_trips_service_and_srm_settings() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("desktop-config.json");
-        let mut config = DesktopConfig::default();
-        config.server_url = "https://sync.example.com".to_owned();
-        config.rom_roots = vec!["/games/roms".to_owned()];
-        config.sync_roots = vec![SyncRoot {
-            emulator_id: "duckstation".to_owned(),
-            path: "/games/emulators/DuckStation".to_owned(),
-            remote_prefix: "duckstation".to_owned(),
-            pull_paths: vec!["memcards/card.mcd".to_owned()],
-        }];
+        let config = DesktopConfig {
+            server_url: "https://sync.example.com".to_owned(),
+            rom_roots: vec!["/games/roms".to_owned()],
+            sync_roots: vec![SyncRoot {
+                emulator_id: "duckstation".to_owned(),
+                path: "/games/emulators/DuckStation".to_owned(),
+                remote_prefix: "duckstation".to_owned(),
+                pull_paths: vec!["memcards/card.mcd".to_owned()],
+            }],
+            ..Default::default()
+        };
         write_desktop_config(&path, &config).unwrap();
         let saved = read_desktop_config(&path).unwrap();
         assert_eq!(saved.service.windows_service_name, "CrashCraftsGameSync");
@@ -1660,14 +1661,19 @@ mod tests {
 
     #[test]
     fn srm_presets_are_generated_from_sync_roots() {
-        let mut config = DesktopConfig::default();
-        config.srm.roms_directory = "/games/roms".to_owned();
-        config.sync_roots = vec![SyncRoot {
-            emulator_id: "dolphin-dev".to_owned(),
-            path: "/games/emulators/Dolphin".to_owned(),
-            remote_prefix: "dolphin-dev".to_owned(),
-            pull_paths: Vec::new(),
-        }];
+        let config = DesktopConfig {
+            srm: SrmConfig {
+                roms_directory: "/games/roms".to_owned(),
+                ..DesktopConfig::default().srm
+            },
+            sync_roots: vec![SyncRoot {
+                emulator_id: "dolphin-dev".to_owned(),
+                path: "/games/emulators/Dolphin".to_owned(),
+                remote_prefix: "dolphin-dev".to_owned(),
+                pull_paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
         let presets = srm_parser_presets(&config);
         assert_eq!(presets["parsers"].as_array().unwrap().len(), 1);
         assert_eq!(presets["parsers"][0]["romDirectory"], "/games/roms");
