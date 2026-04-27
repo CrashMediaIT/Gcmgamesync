@@ -8,6 +8,10 @@ Crash Crafts Game Sync is an emulator save backup and synchronization platform. 
 
 ![Crash Crafts Game Sync Docker pull and CLI output](docs/screenshots/cli-status.svg)
 
+![Crash Crafts Game Sync desktop companion output](docs/screenshots/desktop-companion.svg)
+
+![Crash Crafts Game Sync desktop package outputs](docs/screenshots/desktop-packages.svg)
+
 ## Goals
 
 - Synchronize emulator saves across devices.
@@ -47,6 +51,7 @@ cargo run -- server
 ## Client MVP
 
 ```bash
+cargo run -- companion
 cargo run -- manifest
 cargo run -- scan --root /path/to/emulators
 cargo run -- status --root /path/to/emulators
@@ -56,6 +61,12 @@ cargo run -- daemon --once
 cargo run -- generate-srm
 ```
 
+The desktop builds are companion clients for the Docker-hosted server, not separate Docker
+variants. They configure local emulator paths, run the sync daemon, generate Steam ROM Manager
+presets, and call the Docker server APIs for storage and administration. The default binary entry
+point opens the companion status/setup guidance instead of starting a server; Docker continues to
+start the server explicitly with the `server` command.
+
 The desktop foundation stays in Rust and uses a shared JSON config file. On Linux the default path is
 `~/.config/crash-crafts-game-sync/desktop-config.json`; on Windows it is stored under
 `%APPDATA%\CrashCrafts\GameSync\desktop-config.json`. The daemon scans configured emulator roots
@@ -64,11 +75,12 @@ explicitly configured remote paths, and generates Steam ROM Manager parser prese
 
 ## Desktop packaging direction
 
+- Linux release builds publish a raw tarball plus `.deb`, `.rpm`, and AUR `PKGBUILD`
+  companion packages. Each installs the same Rust binary, desktop launcher, and
+  systemd user service so Debian/Ubuntu, RPM-based distributions, and Arch/AUR users
+  can install the desktop companion natively.
 - Windows builds should ship as an MSI that installs the Rust daemon as the
   `CrashCraftsGameSync` Windows Service. A WiX template is in `packaging/windows/Product.wxs`.
-- Linux builds should ship native packages first (`.deb`, then `.rpm` as needed) with a systemd
-  user service from `packaging/linux/crash-crafts-game-sync.service` and a desktop entry from
-  `packaging/linux/crash-crafts-game-sync.desktop`.
 - Steam Deck game mode should use a Decky Loader companion plugin manifest in
   `packaging/steam-deck/decky-plugin/plugin.json`; the plugin should control/status the daemon
   rather than sync files itself.

@@ -32,13 +32,43 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+
       - name: Package Linux artifact
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/linux-packaging
-          cp target/release/crash-crafts-game-sync dist/
-          cp packaging/linux/* dist/linux-packaging/
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
+          set -eux
+          version="$(grep '^version =' Cargo.toml | head -1 | cut -d '"' -f 2)"
+          binary="target/release/crash-crafts-game-sync"
+
+          mkdir -p dist/tar/linux-packaging
+          cp "${binary}" dist/tar/
+          cp -R packaging/linux/. dist/tar/linux-packaging/
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist/tar .
+
+          deb_root="dist/debian-root"
+          install -Dm0755 "${binary}" "${deb_root}/usr/bin/crash-crafts-game-sync"
+          install -Dm0644 packaging/linux/crash-crafts-game-sync.desktop "${deb_root}/usr/share/applications/crash-crafts-game-sync.desktop"
+          install -Dm0644 packaging/linux/crash-crafts-game-sync.service "${deb_root}/usr/lib/systemd/user/crash-crafts-game-sync.service"
+          install -Dm0644 packaging/linux/debian/control "${deb_root}/DEBIAN/control"
+          sed -i "s/@VERSION@/${version}/" "${deb_root}/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "${deb_root}" "${{ matrix.artifact }}.deb"
+
+          rpmbuild_root="${PWD}/dist/rpmbuild"
+          mkdir -p "${rpmbuild_root}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cp "${binary}" "${rpmbuild_root}/SOURCES/crash-crafts-game-sync"
+          cp packaging/linux/crash-crafts-game-sync.desktop "${rpmbuild_root}/SOURCES/"
+          cp packaging/linux/crash-crafts-game-sync.service "${rpmbuild_root}/SOURCES/"
+          cp packaging/linux/rpm/crash-crafts-game-sync.spec "${rpmbuild_root}/SPECS/"
+          rpmbuild -bb --define "_topdir ${rpmbuild_root}" --define "version ${version}" "${rpmbuild_root}/SPECS/crash-crafts-game-sync.spec"
+          cp "${rpmbuild_root}"/RPMS/*/*.rpm "${{ matrix.artifact }}.rpm"
+
+          mkdir -p dist/aur/crash-crafts-game-sync
+          cp packaging/linux/aur/PKGBUILD packaging/linux/aur/.SRCINFO dist/aur/crash-crafts-game-sync/
+          cp packaging/linux/crash-crafts-game-sync.desktop packaging/linux/crash-crafts-game-sync.service dist/aur/crash-crafts-game-sync/
+          tar -czf "${{ matrix.artifact }}-aur.tar.gz" -C dist/aur crash-crafts-game-sync
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
@@ -55,5 +85,8 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.deb
+            ${{ matrix.artifact }}.rpm
+            ${{ matrix.artifact }}-aur.tar.gz
             ${{ matrix.artifact }}.zip
           if-no-files-found: error

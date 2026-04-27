@@ -1,0 +1,12 @@
+Package: crash-crafts-game-sync
+Version: @VERSION@
+Section: games
+Priority: optional
+Architecture: amd64
+Maintainer: CrashMediaIT <support@crashmediait.com>
+Depends: ca-certificates, libc6
+Description: Desktop companion for Crash Crafts Game Sync
+ Crash Crafts Game Sync is a desktop companion daemon for the Docker-hosted
+ sync server. It configures local emulator paths, runs background save sync,
+ and generates Steam ROM Manager presets while server administration remains
+ in the Docker Web UI.

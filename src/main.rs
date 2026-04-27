@@ -1352,6 +1352,39 @@ fn cmd_desktop_config(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn desktop_companion_status(path: &Path, config: &DesktopConfig) -> Value {
+    let configured = !config.auth_token.trim().is_empty()
+        && validate_server_url(&config.server_url).is_ok()
+        && !config.sync_roots.is_empty();
+    json!({
+        "mode": "desktop_companion",
+        "docker_server_url": config.server_url,
+        "config_path": path,
+        "configured": configured,
+        "auth_token_configured": !config.auth_token.trim().is_empty(),
+        "sync_roots": config.sync_roots,
+        "next_steps": [
+            "Run setup-desktop with the Docker server URL, user token, ROM roots, and emulator roots.",
+            "Start daemon after setup to sync saves with the Docker server.",
+            "Use the Docker Web UI for server administration, invites, branding, and account setup."
+        ]
+    })
+}
+
+fn cmd_companion(args: &[String]) -> AppResult<()> {
+    let path = config_path_from_args(args)?;
+    let config = if path.exists() {
+        read_desktop_config(&path)?
+    } else {
+        DesktopConfig::default()
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&desktop_companion_status(&path, &config))?
+    );
+    Ok(())
+}
+
 fn cmd_setup_desktop(args: &[String]) -> AppResult<()> {
     let path = config_path_from_args(args)?;
     let mut config = if path.exists() {
@@ -1444,6 +1477,7 @@ fn cmd_generate_srm(args: &[String]) -> AppResult<()> {
 fn print_usage() {
     eprintln!(
         "usage:
+   crash-crafts-game-sync companion [--config <path>]
    crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
    crash-crafts-game-sync manifest
    crash-crafts-game-sync scan --root <path>
@@ -1457,9 +1491,17 @@ fn print_usage() {
     );
 }
 
+fn command_name(args: &[String]) -> &str {
+    args.get(1)
+        .filter(|arg| !arg.starts_with("--"))
+        .map(String::as_str)
+        .unwrap_or("companion")
+}
+
 fn main() -> AppResult<()> {
     let args: Vec<String> = env::args().collect();
-    match args.get(1).map(String::as_str).unwrap_or("server") {
+    match command_name(&args) {
+        "companion" => cmd_companion(&args),
         "server" => run_server(&args),
         "manifest" => {
             println!("{}", serde_json::to_string_pretty(&manifest())?);
@@ -1657,6 +1699,57 @@ mod tests {
         let saved = read_desktop_config(&path).unwrap();
         assert_eq!(saved.service.windows_service_name, "CrashCraftsGameSync");
         assert_eq!(saved.sync_roots[0].remote_prefix, "duckstation");
+    }
+
+    #[test]
+    fn companion_status_reports_docker_companion_setup_state() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("desktop-config.json");
+        let empty = DesktopConfig::default();
+        let empty_status = desktop_companion_status(&path, &empty);
+        assert_eq!(empty_status["mode"], "desktop_companion");
+        assert_eq!(empty_status["configured"], false);
+
+        let configured = DesktopConfig {
+            server_url: "https://sync.example.com".to_owned(),
+            auth_token: "token".to_owned(),
+            sync_roots: vec![SyncRoot {
+                emulator_id: "duckstation".to_owned(),
+                path: "/games/emulators/DuckStation".to_owned(),
+                emulator_executable: String::new(),
+                remote_prefix: "duckstation".to_owned(),
+                pull_paths: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let configured_status = desktop_companion_status(&path, &configured);
+        assert_eq!(configured_status["configured"], true);
+        assert!(
+            configured_status["next_steps"][0]
+                .as_str()
+                .unwrap()
+                .contains("Docker server URL")
+        );
+    }
+
+    #[test]
+    fn no_command_or_config_only_defaults_to_companion() {
+        assert_eq!(
+            command_name(&["crash-crafts-game-sync".to_owned()]),
+            "companion"
+        );
+        assert_eq!(
+            command_name(&[
+                "crash-crafts-game-sync".to_owned(),
+                "--config".to_owned(),
+                "desktop-config.json".to_owned()
+            ]),
+            "companion"
+        );
+        assert_eq!(
+            command_name(&["crash-crafts-game-sync".to_owned(), "server".to_owned()]),
+            "server"
+        );
     }
 
     #[test]

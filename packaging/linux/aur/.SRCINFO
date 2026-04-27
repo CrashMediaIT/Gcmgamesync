@@ -1,0 +1,20 @@
+pkgbase = crash-crafts-game-sync
+	pkgdesc = Desktop companion for the Docker-hosted Crash Crafts Game Sync server
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/CrashMediaIT/Gcmgamesync
+	arch = x86_64
+	license = custom
+	makedepends = cargo
+	makedepends = git
+	depends = ca-certificates
+	depends = gcc-libs
+	depends = glibc
+	source = Gcmgamesync::git+https://github.com/CrashMediaIT/Gcmgamesync.git#tag=v0.1.0
+	source = crash-crafts-game-sync.desktop
+	source = crash-crafts-game-sync.service
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = crash-crafts-game-sync

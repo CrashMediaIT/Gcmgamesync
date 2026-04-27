@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">Crash Crafts Game Sync Linux package screenshot</title>
+  <desc id="desc">Desktop companion package outputs for Debian, RPM, and AUR distributions.</desc>
+  <rect width="1200" height="620" fill="#070a12"/>
+  <rect x="80" y="58" width="1040" height="504" rx="28" fill="#111827" opacity=".88" stroke="#ffffff" stroke-opacity=".14"/>
+  <text x="120" y="124" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="900">Desktop companion packages</text>
+  <text x="120" y="164" fill="#aab7cf" font-family="Inter, Arial, sans-serif" font-size="20">Install locally; sync and administration still use the Docker server.</text>
+  <g font-family="Inter, Arial, sans-serif">
+    <rect x="120" y="220" width="280" height="230" rx="24" fill="#0c121f" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="150" y="276" fill="#ff7a1a" font-size="34" font-weight="900">Debian</text>
+    <text x="150" y="320" fill="#f8fafc" font-size="20">.deb artifact</text>
+    <text x="150" y="356" fill="#aab7cf" font-size="17">/usr/bin companion</text>
+    <text x="150" y="386" fill="#aab7cf" font-size="17">Desktop launcher</text>
+    <text x="150" y="416" fill="#aab7cf" font-size="17">systemd user service</text>
+    <rect x="460" y="220" width="280" height="230" rx="24" fill="#0c121f" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="490" y="276" fill="#22d3ee" font-size="34" font-weight="900">RPM</text>
+    <text x="490" y="320" fill="#f8fafc" font-size="20">.rpm artifact</text>
+    <text x="490" y="356" fill="#aab7cf" font-size="17">Fedora/openSUSE-ready</text>
+    <text x="490" y="386" fill="#aab7cf" font-size="17">Same companion binary</text>
+    <text x="490" y="416" fill="#aab7cf" font-size="17">Same user service</text>
+    <rect x="800" y="220" width="280" height="230" rx="24" fill="#0c121f" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="830" y="276" fill="#7ee787" font-size="34" font-weight="900">AUR</text>
+    <text x="830" y="320" fill="#f8fafc" font-size="20">PKGBUILD bundle</text>
+    <text x="830" y="356" fill="#aab7cf" font-size="17">Builds from release tag</text>
+    <text x="830" y="386" fill="#aab7cf" font-size="17">Installs launcher</text>
+    <text x="830" y="416" fill="#aab7cf" font-size="17">Installs user service</text>
+  </g>
+  <rect x="120" y="492" width="960" height="42" rx="14" fill="#ffffff" opacity=".08" stroke="#ffffff" stroke-opacity=".14"/>
+  <text x="148" y="520" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">crash-crafts-game-sync companion → setup-desktop → daemon --once</text>
+</svg>
