@@ -2537,7 +2537,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     // Re-poll the per-OS effective release source (Dolphin uses
                     // a dev-website source for Windows and the pkgforge
                     // AppImage feed for Linux, so each OS needs its own poll).
-                    pick_asset(&release_assets_for_os(&emulator, os).unwrap_or_default(), os)
+                    pick_asset(
+                        &release_assets_for_os(&emulator, os).unwrap_or_default(),
+                        os,
+                    )
                 };
                 let Some(url) = asset_url else {
                     errors.push(json!({
