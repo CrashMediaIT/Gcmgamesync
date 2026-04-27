@@ -2,9 +2,10 @@
   "name": "Crash Crafts Game Sync",
   "author": "CrashMediaIT",
   "flags": ["debug"],
+  "api_version": 1,
   "publish": {
-    "tags": ["emulation", "sync", "saves"],
-    "description": "Game-mode companion for the Rust Crash Crafts Game Sync daemon. Shows daemon status and opens desktop setup while sync remains in the user service.",
-    "image": ""
+    "tags": ["emulation", "sync", "saves", "rom-manager"],
+    "description": "Steam Deck Game-Mode helper for Crash Crafts Game Sync. Shows live save-sync status, lets you trigger a sync, and lists detected emulators by talking to the local crash-crafts-game-sync-gui server on 127.0.0.1.",
+    "image": "https://raw.githubusercontent.com/CrashMediaIT/Gcmgamesync/main/docs/screenshots/decky-helper.png"
   }
 }

@@ -369,7 +369,102 @@
       escapeHtml(data.file_versions_to_keep) +
       " copies — Logo: " +
       (data.logo_configured ? "configured" : "default") +
-      "</p>";
+      "</p>" +
+      '<div class="card"><h3>Emulator updates</h3>' +
+      '<p class="muted">Push a single new version to every desktop user. The server downloads the upstream release, validates it, and stores it as the shared bundle that every desktop client pulls on its next install/update.</p>' +
+      '<button id="check-emulator-updates">Check for updates</button>' +
+      '<div id="emulator-updates-result" class="mt"></div></div>';
+    const button = $("#check-emulator-updates");
+    if (button) {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        button.textContent = "Checking...";
+        const r = await api("/api/admin/check-emulator-updates");
+        button.disabled = false;
+        button.textContent = "Check for updates";
+        renderEmulatorUpdates(r.ok ? r.body.emulators || [] : [], r.ok ? "" : (r.body.error || "Failed"));
+      });
+    }
+  }
+
+  function renderEmulatorUpdates(list, error) {
+    const container = $("#emulator-updates-result");
+    if (!container) return;
+    if (error) {
+      container.innerHTML = '<p class="error">' + escapeHtml(error) + "</p>";
+      return;
+    }
+    const updatable = list.filter((e) => e.has_update);
+    if (updatable.length === 0) {
+      container.innerHTML = '<p class="muted">All published bundles are up to date.</p>';
+      return;
+    }
+    container.innerHTML =
+      '<p class="muted">' +
+      updatable.length +
+      " update(s) available. Select which to apply for all users:</p>" +
+      '<table class="data"><thead><tr><th>Apply</th><th>Emulator</th><th>Currently published</th><th>Latest upstream</th><th>Released</th></tr></thead><tbody>' +
+      updatable
+        .map(
+          (e) =>
+            '<tr><td><input type="checkbox" data-update="' +
+            escapeHtml(e.id) +
+            '" checked></td><td>' +
+            escapeHtml(e.name) +
+            '</td><td>' +
+            escapeHtml(e.applied_version || "—") +
+            '</td><td><a href="' +
+            escapeHtml(e.release_url) +
+            '" target="_blank" rel="noopener">' +
+            escapeHtml(e.latest_version) +
+            "</a></td><td>" +
+            escapeHtml(e.latest_published_at) +
+            "</td></tr>"
+        )
+        .join("") +
+      "</tbody></table>" +
+      '<button id="apply-selected-updates" class="mt">Apply selected updates for all users</button>' +
+      '<div id="apply-result" class="mt"></div>';
+    $("#apply-selected-updates").addEventListener("click", async () => {
+      const ids = $$("#emulator-updates-result input[data-update]:checked").map((i) =>
+        i.getAttribute("data-update")
+      );
+      const button = $("#apply-selected-updates");
+      const result = $("#apply-result");
+      button.disabled = true;
+      button.textContent = "Applying...";
+      result.innerHTML = "";
+      const responses = [];
+      for (const id of ids) {
+        const r = await api("/api/admin/apply-emulator-update", {
+          method: "POST",
+          body: { emulator_id: id, os: "all" },
+        });
+        responses.push({ id, response: r });
+      }
+      button.disabled = false;
+      button.textContent = "Apply selected updates for all users";
+      result.innerHTML = responses
+        .map(({ id, response }) => {
+          if (!response.ok) {
+            return '<p class="error">' + escapeHtml(id) + ": " + escapeHtml(response.body.error || "failed") + "</p>";
+          }
+          const body = response.body;
+          const errs = (body.errors || []).map((e) => e.os + ": " + e.error).join("; ");
+          return (
+            '<p>' +
+            escapeHtml(id) +
+            " → applied " +
+            escapeHtml(body.applied_version || "") +
+            " (" +
+            (body.published || []).length +
+            " bundle(s) published" +
+            (errs ? "; errors: " + escapeHtml(errs) : "") +
+            ")</p>"
+          );
+        })
+        .join("");
+    });
   }
 
   async function refreshConfig() {

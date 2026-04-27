@@ -108,16 +108,281 @@ pub fn detect_emulators(root: &Path) -> Vec<Value> {
                         .get(os)
                         .cloned()
                         .unwrap_or_else(|| json!({"source": "unsupported"}));
+                    let save_paths: Vec<String> = emulator["save_paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|sub| path.join(sub).to_string_lossy().into_owned())
+                        .collect();
                     Some(json!({
                         "id": emulator["id"],
                         "name": emulator["name"],
                         "path": path.to_string_lossy(),
                         "portable": portable,
-                        "update_policy": update_policy
+                        "update_policy": update_policy,
+                        "save_paths": save_paths
                     }))
                 })
         })
         .collect()
+}
+
+/// Create the per-emulator portable-mode marker file inside `install_dir` so
+/// the next time the emulator launches it stores all save data, configuration,
+/// and states under its own folder (instead of leaking to the user's home dir).
+///
+/// Each manifest entry declares which file or directory-marker to create via
+/// `portable_marker_to_create`. To avoid clobbering device-specific emulator
+/// configuration files (e.g. RPCS3's `config.yml`, which holds GPU backend
+/// and controller bindings), the marker is *only* allowed to be:
+///
+///   * a file the emulator treats as a pure presence-marker (DuckStation
+///     `portable.txt`, PCSX2 `portable.ini`, Xenia `portable.txt`, Dolphin
+///     `portable.txt`); or
+///   * a `*/.keep` placeholder inside a directory-shaped marker (RPCS3
+///     `GuiConfigs/.keep`, Eden `user/.keep`); or
+///   * an entry that does not collide with any path listed in the
+///     emulator's own `sync_exclude` / `portable_markers` config-file set.
+///
+/// If the manifest's `portable_marker_to_create` would touch a real
+/// configuration file, this function refuses and returns an error so the
+/// caller can surface it to the user instead of silently rewriting their
+/// emulator settings.
+///
+/// Idempotent: if the marker already exists this is a no-op so we do not
+/// clobber a config the user may have hand-edited.
+pub fn enable_portable_mode(emulator: &Value, install_dir: &Path) -> AppResult<Option<PathBuf>> {
+    if !manifest()["policy"]["auto_enable_portable_mode"]
+        .as_bool()
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let Some(marker) = emulator["portable_marker_to_create"].as_str() else {
+        return Ok(None);
+    };
+    if marker.is_empty() {
+        return Ok(None);
+    }
+
+    // Refuse to (re)write any file that matches the emulator's own
+    // device-local exclude patterns. This protects RPCS3's config.yml and
+    // similar emulator settings from being clobbered by automated portable
+    // setup.
+    let normalized = marker.replace('\\', "/");
+    let touches_config = emulator["sync_exclude"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|pattern| {
+            glob::Pattern::new(pattern)
+                .map(|pat| pat.matches(&normalized))
+                .unwrap_or(false)
+        });
+    if touches_config {
+        return Err(format!(
+            "refusing to auto-create portable marker '{marker}': it overlaps the emulator's device-local config files"
+        )
+        .into());
+    }
+
+    let target = install_dir.join(marker);
+    if target.exists() {
+        return Ok(Some(target));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::File::create(&target)?;
+    Ok(Some(target))
+}
+
+/// Information about the latest upstream release of a given emulator,
+/// returned by `latest_release`. `version` is the tag name as the upstream
+/// publishes it, `published_at` is the upstream timestamp, `download_url` is
+/// the per-OS asset URL when one matches the conventional asset-name pattern.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct LatestRelease {
+    pub version: String,
+    pub published_at: String,
+    pub download_url: Option<String>,
+    pub source_url: String,
+}
+
+/// Discover the latest upstream release for an emulator.
+///
+/// Supports two release sources:
+///   * `github_release` — uses the public GitHub API (`/repos/{owner}/{repo}/releases/latest`,
+///     falling back to `/releases?per_page=1` when only prereleases exist).
+///   * `gitea_release` — used by Eden Nightly (`https://git.eden-emu.dev`).
+///     Hits the same `/api/v1/repos/{owner}/{repo}/releases?limit=1` shape
+///     that Gitea has used since 1.x.
+///
+/// All emulators in `shared/emulators.json` are covered: DuckStation, PCSX2
+/// Nightly, RPCS3 Nightly (binaries-win), Xenia Canary, xemu, Cemu,
+/// RetroArch, Eden Nightly, and Dolphin Dev.
+pub fn latest_release(emulator: &Value) -> AppResult<LatestRelease> {
+    let source = emulator
+        .get("release_source")
+        .ok_or("emulator manifest is missing release_source")?;
+    let kind = source["type"].as_str().unwrap_or("");
+    let os = current_os();
+    match kind {
+        "github_release" => {
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("github_release.repo is required")?;
+            let prerelease = source["prerelease"].as_bool().unwrap_or(false);
+            let url = if prerelease {
+                format!("https://api.github.com/repos/{repo}/releases?per_page=1")
+            } else {
+                format!("https://api.github.com/repos/{repo}/releases/latest")
+            };
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/vnd.github+json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = if prerelease {
+                body.as_array()
+                    .and_then(|arr| arr.first().cloned())
+                    .ok_or("no GitHub releases returned")?
+            } else {
+                body
+            };
+            Ok(LatestRelease {
+                version: release["tag_name"].as_str().unwrap_or("").to_owned(),
+                published_at: release["published_at"].as_str().unwrap_or("").to_owned(),
+                download_url: pick_asset(&release["assets"], os),
+                source_url: release["html_url"].as_str().unwrap_or(&url).to_owned(),
+            })
+        }
+        "gitea_release" => {
+            let base = source["base"]
+                .as_str()
+                .ok_or("gitea_release.base is required")?
+                .trim_end_matches('/');
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("gitea_release.repo is required")?;
+            let url = format!("{base}/api/v1/repos/{repo}/releases?limit=1");
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = body
+                .as_array()
+                .and_then(|arr| arr.first().cloned())
+                .ok_or("no Gitea releases returned")?;
+            Ok(LatestRelease {
+                version: release["tag_name"].as_str().unwrap_or("").to_owned(),
+                published_at: release["published_at"].as_str().unwrap_or("").to_owned(),
+                download_url: pick_asset(&release["assets"], os),
+                source_url: release["html_url"].as_str().unwrap_or(&url).to_owned(),
+            })
+        }
+        other => Err(format!("unsupported release source type: {other}").into()),
+    }
+}
+
+/// Re-fetch the upstream release assets array so callers can run
+/// `pick_asset` against a different OS than the host's. Used by the
+/// admin "apply update" endpoint to publish both the Windows and Linux
+/// bundles from a single button click.
+fn release_assets(emulator: &Value) -> AppResult<Value> {
+    let source = emulator
+        .get("release_source")
+        .ok_or("emulator manifest is missing release_source")?;
+    let kind = source["type"].as_str().unwrap_or("");
+    match kind {
+        "github_release" => {
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("github_release.repo is required")?;
+            let prerelease = source["prerelease"].as_bool().unwrap_or(false);
+            let url = if prerelease {
+                format!("https://api.github.com/repos/{repo}/releases?per_page=1")
+            } else {
+                format!("https://api.github.com/repos/{repo}/releases/latest")
+            };
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/vnd.github+json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = if prerelease {
+                body.as_array()
+                    .and_then(|arr| arr.first().cloned())
+                    .ok_or("no GitHub releases returned")?
+            } else {
+                body
+            };
+            Ok(release["assets"].clone())
+        }
+        "gitea_release" => {
+            let base = source["base"]
+                .as_str()
+                .ok_or("gitea_release.base is required")?
+                .trim_end_matches('/');
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("gitea_release.repo is required")?;
+            let url = format!("{base}/api/v1/repos/{repo}/releases?limit=1");
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = body
+                .as_array()
+                .and_then(|arr| arr.first().cloned())
+                .ok_or("no Gitea releases returned")?;
+            Ok(release["assets"].clone())
+        }
+        other => Err(format!("unsupported release source type: {other}").into()),
+    }
+}
+
+fn pick_asset(assets: &Value, os: &str) -> Option<String> {
+    let needles: &[&str] = if os == "windows" {
+        &[
+            "windows",
+            "win64",
+            "win-x64",
+            "win_x64",
+            ".exe",
+            ".7z",
+            "x86_64-pc-windows",
+        ]
+    } else {
+        &[
+            "linux",
+            ".AppImage",
+            ".appimage",
+            "x86_64-linux",
+            "ubuntu",
+            "x86_64-unknown-linux",
+        ]
+    };
+    let assets = assets.as_array()?;
+    for asset in assets {
+        let name = asset["name"].as_str().unwrap_or("").to_lowercase();
+        if needles
+            .iter()
+            .any(|needle| name.contains(&needle.to_lowercase()))
+            && let Some(url) = asset["browser_download_url"].as_str()
+        {
+            return Some(url.to_owned());
+        }
+    }
+    None
 }
 
 pub fn should_sync(relative_path: &str, emulator: &Value) -> bool {
@@ -571,15 +836,35 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Install (download) a portable emulator build into the configured emulator
-/// root for the current OS. Returns the path on disk for the downloaded
-/// archive. If the manifest does not ship a download URL for this OS, an error
-/// is returned and the GUI should fall back to opening the emulator homepage.
+/// Install or update an emulator into the user's configured emulator root,
+/// preferring a server-curated portable bundle and falling back to the
+/// upstream URL only when no bundle is available.
 ///
-/// The desktop app first asks the configured Docker server for the live
-/// manifest (which contains any admin-published emulator updates) so that
-/// rolling out a new emulator version to every user is a single
-/// `POST /api/admin/emulators` call by the admin.
+/// The flow:
+///
+///   1. Ask the Docker server for `GET /api/emulator-bundle/{id}/{os}`. The
+///      server returns a single zip whose top level is the portable
+///      directory the admin tested (RPCS3 with its `GuiConfigs/`, Cemu
+///      with `settings.xml`, etc.). Because the admin already enabled
+///      portable mode on the bundle, the desktop never has to invent
+///      portable markers — there is nothing to break per-device.
+///   2. Extract the bundle into `{emulator_root}/{id}`.
+///        * On a *first* install (no `.crash-crafts-managed.json` marker
+///          present) every file is written, including the bundle's
+///          working baseline config so the emulator launches with sane
+///          defaults.
+///        * On a subsequent install / update, files matching the
+///          emulator's `sync_exclude` patterns (controller bindings,
+///          RPCS3 `config.yml`, Cemu `settings.xml`, RetroArch
+///          `retroarch.cfg`, etc.) are *skipped* so the user's
+///          per-device settings survive the update.
+///   3. If the server has no bundle for this emulator/OS, fall back to
+///      the upstream `downloads.{os}.url` from the live manifest. This
+///      preserves the original "download portable build directly from
+///      the vendor" path for setups where the admin has not curated a
+///      bundle yet.
+///
+/// Returns the install directory on success.
 pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<PathBuf> {
     let manifest = fetch_live_manifest(config).unwrap_or_else(|_| manifest());
     let emulator = manifest["emulators"]
@@ -589,12 +874,6 @@ pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<
         .find(|em| em["id"].as_str() == Some(emulator_id))
         .cloned()
         .ok_or_else(|| format!("unknown emulator id: {emulator_id}"))?;
-    let spec = emulator_download_spec(&emulator, current_os()).ok_or_else(|| {
-        format!(
-            "no portable download URL for {emulator_id} on {}",
-            current_os()
-        )
-    })?;
     let root = config
         .emulator_roots
         .first()
@@ -602,6 +881,30 @@ pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<
         .ok_or("emulator_roots is empty; pick an emulator install directory first")?;
     let dir = PathBuf::from(root).join(emulator_id);
     fs::create_dir_all(&dir)?;
+
+    // Preferred path: server-curated portable bundle.
+    match download_emulator_bundle(config, emulator_id) {
+        Ok(bundle_bytes) => {
+            let is_update = managed_marker_path(&dir).exists();
+            extract_bundle_into(&bundle_bytes, &dir, &emulator, is_update)?;
+            write_managed_marker(&dir, &emulator)?;
+            return Ok(dir);
+        }
+        Err(BundleError::NotFound) => {
+            // Fall through to the upstream URL fallback.
+        }
+        Err(BundleError::Other(error)) => {
+            return Err(error);
+        }
+    }
+
+    // Fallback: upstream vendor URL from the manifest.
+    let spec = emulator_download_spec(&emulator, current_os()).ok_or_else(|| {
+        format!(
+            "no portable download URL for {emulator_id} on {} and the server has no bundle for it",
+            current_os()
+        )
+    })?;
     let filename = spec
         .url
         .rsplit('/')
@@ -610,7 +913,136 @@ pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<
         .unwrap_or("emulator.bin");
     let destination = dir.join(filename);
     download_with_checksum(&spec, &destination)?;
-    Ok(destination)
+    Ok(dir)
+}
+
+enum BundleError {
+    NotFound,
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+fn managed_marker_path(install_dir: &Path) -> PathBuf {
+    install_dir.join(".crash-crafts-managed.json")
+}
+
+fn write_managed_marker(install_dir: &Path, emulator: &Value) -> AppResult<()> {
+    let payload = json!({
+        "emulator_id": emulator["id"],
+        "managed_by": APP_NAME,
+        "installed_at": unix_time(),
+        "schema_version": 1
+    });
+    let path = managed_marker_path(install_dir);
+    let serialized = serde_json::to_vec_pretty(&payload)?;
+    fs::write(path, serialized)?;
+    Ok(())
+}
+
+fn download_emulator_bundle(
+    config: &DesktopConfig,
+    emulator_id: &str,
+) -> Result<Vec<u8>, BundleError> {
+    let server = match validate_server_url(&config.server_url) {
+        Ok(url) => url.trim_end_matches('/').to_owned(),
+        Err(error) => return Err(BundleError::Other(error)),
+    };
+    let url = format!(
+        "{server}/api/emulator-bundle/{}/{}",
+        urlencoding::encode(emulator_id),
+        current_os()
+    );
+    let mut request = ureq::get(&url);
+    if !config.auth_token.is_empty() {
+        request = request.header("Authorization", &format!("Bearer {}", config.auth_token));
+    }
+    match request.call() {
+        Ok(response) => {
+            let mut body = response.into_body();
+            match body.read_to_vec() {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => Err(BundleError::Other(error.into())),
+            }
+        }
+        Err(ureq::Error::StatusCode(404)) => Err(BundleError::NotFound),
+        Err(error) => Err(BundleError::Other(error.into())),
+    }
+}
+
+/// Extract `bundle_bytes` (a zip archive whose entries are relative paths
+/// inside the emulator's portable folder) into `install_dir`. When
+/// `is_update` is true, files whose relative path matches any of the
+/// emulator's `sync_exclude` glob patterns are skipped so the user's
+/// per-device emulator config (controller bindings, GPU backend, RPCS3
+/// `config.yml`, Cemu `settings.xml`, RetroArch `retroarch.cfg`, etc.) is
+/// preserved across updates.
+///
+/// Hardened against zip-slip: every entry's resolved path must remain
+/// inside `install_dir`.
+pub fn extract_bundle_into(
+    bundle_bytes: &[u8],
+    install_dir: &Path,
+    emulator: &Value,
+    is_update: bool,
+) -> AppResult<Vec<String>> {
+    use std::io::Cursor;
+    let exclude_patterns: Vec<glob::Pattern> = emulator["sync_exclude"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|raw| glob::Pattern::new(raw).ok())
+        .collect();
+    let mut archive = zip::ZipArchive::new(Cursor::new(bundle_bytes)).map_err(
+        |error| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("invalid emulator bundle: {error}").into()
+        },
+    )?;
+    let install_canonical = install_dir
+        .canonicalize()
+        .unwrap_or_else(|_| install_dir.to_path_buf());
+    let mut skipped: Vec<String> = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(
+            |error| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("bundle entry {index}: {error}").into()
+            },
+        )?;
+        // `enclosed_name` returns None for absolute or `..`-escaping paths.
+        let enclosed = match entry.enclosed_name() {
+            Some(name) => name,
+            None => {
+                return Err(format!("bundle contains unsafe path: {}", entry.name()).into());
+            }
+        };
+        let relative_str = enclosed.to_string_lossy().replace('\\', "/");
+        let target = install_dir.join(&enclosed);
+        // Defence-in-depth zip-slip check.
+        if let Some(parent) = target.parent()
+            && let Ok(parent_canonical) = parent.canonicalize()
+            && !parent_canonical.starts_with(&install_canonical)
+        {
+            return Err(format!("bundle entry would escape install dir: {relative_str}").into());
+        }
+        if entry.is_dir() {
+            fs::create_dir_all(&target)?;
+            continue;
+        }
+        if is_update
+            && exclude_patterns
+                .iter()
+                .any(|pattern| pattern.matches(&relative_str))
+        {
+            skipped.push(relative_str);
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut writer = fs::File::create(&target)?;
+        secure_file(&writer)?;
+        std::io::copy(&mut entry, &mut writer)?;
+    }
+    Ok(skipped)
 }
 
 fn fetch_live_manifest(config: &DesktopConfig) -> AppResult<Value> {
@@ -837,6 +1269,18 @@ fn unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Path-segment whitelist used by the emulator-bundle endpoints. Only
+/// lowercase ASCII alphanumerics, dashes, dots, and underscores are allowed
+/// so a malicious admin upload cannot escape `data_dir/emulator-bundles/`.
+fn is_safe_bundle_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 fn unix_millis() -> u128 {
@@ -1615,6 +2059,270 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             Ok(json_response(
                 200,
                 json!({"emulator_updates": data["emulator_updates"].clone()}),
+            ))
+        }
+        // Admin uploads a tested portable emulator bundle (zip) for a given
+        // OS. The next time any desktop client calls "Install / Update" for
+        // that emulator, it downloads this bundle, extracts it on disk, and
+        // — for everything after the first install — skips files that match
+        // the emulator's `sync_exclude` patterns so per-device emulator
+        // settings (controllers, GPU backend, RPCS3 `config.yml`, Cemu
+        // `settings.xml`, etc.) survive updates.
+        (Method::Put, path) if path.starts_with("/api/admin/emulator-bundle/") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let suffix = path.trim_start_matches("/api/admin/emulator-bundle/");
+            let parts: Vec<&str> = suffix.split('/').collect();
+            if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "expected /api/admin/emulator-bundle/{id}/{os}"}),
+                ));
+            }
+            let emulator_id = urlencoding::decode(parts[0])?.into_owned();
+            let os = urlencoding::decode(parts[1])?.into_owned();
+            if !is_safe_bundle_segment(&emulator_id) || !is_safe_bundle_segment(&os) {
+                return Ok(json_response(400, json!({"error": "invalid id or os"})));
+            }
+            let mut content = Vec::new();
+            request.as_reader().read_to_end(&mut content)?;
+            // Sanity-check the upload is actually a zip — fail fast so admins
+            // don't silently publish broken bundles.
+            if zip::ZipArchive::new(std::io::Cursor::new(&content)).is_err() {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "uploaded bundle is not a valid zip archive"}),
+                ));
+            }
+            let dir = state.data_dir.join("emulator-bundles").join(&emulator_id);
+            secure_create_dir_all(&dir)?;
+            let target = dir.join(format!("{os}.zip"));
+            fs::write(&target, &content)?;
+            Ok(json_response(
+                200,
+                json!({"ok": true, "bytes": content.len(), "path": target.to_string_lossy()}),
+            ))
+        }
+        // Authenticated download: every desktop client uses this to install
+        // and to receive emulator updates from the server-curated bundle.
+        (Method::Get, path) if path.starts_with("/api/emulator-bundle/") => {
+            if require_user(&state, &request)?.is_none() {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            }
+            let suffix = path.trim_start_matches("/api/emulator-bundle/");
+            let parts: Vec<&str> = suffix.split('/').collect();
+            if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "expected /api/emulator-bundle/{id}/{os}"}),
+                ));
+            }
+            let emulator_id = urlencoding::decode(parts[0])?.into_owned();
+            let os = urlencoding::decode(parts[1])?.into_owned();
+            if !is_safe_bundle_segment(&emulator_id) || !is_safe_bundle_segment(&os) {
+                return Ok(json_response(400, json!({"error": "invalid id or os"})));
+            }
+            let target = state
+                .data_dir
+                .join("emulator-bundles")
+                .join(&emulator_id)
+                .join(format!("{os}.zip"));
+            if !target.exists() {
+                return Ok(json_response(
+                    404,
+                    json!({"error": "no bundle published for this emulator/OS"}),
+                ));
+            }
+            let bytes = fs::read(&target)?;
+            Ok(response(200, bytes, "application/zip"))
+        }
+        // Single-click admin "Check for updates" — polls each emulator's
+        // upstream release source and returns which ones have a version
+        // newer than what the server has previously distributed. Backs the
+        // "Update all emulators" Web UI button.
+        (Method::Get, "/api/admin/check-emulator-updates") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let applied = {
+                let store = state.store.lock().unwrap();
+                let data = store.read()?;
+                data["applied_emulator_versions"].clone()
+            };
+            let mut entries: Vec<Value> = Vec::new();
+            for emulator in manifest()["emulators"].as_array().into_iter().flatten() {
+                let id = emulator["id"].as_str().unwrap_or("").to_owned();
+                let mut entry = json!({
+                    "id": id,
+                    "name": emulator["name"].as_str().unwrap_or(""),
+                    "applied_version": applied[&id]["version"].as_str().unwrap_or(""),
+                    "applied_at": applied[&id]["applied_at"].as_u64().unwrap_or(0),
+                    "has_update": false,
+                    "latest_version": "",
+                    "latest_published_at": "",
+                    "download_url": "",
+                    "release_url": "",
+                    "error": ""
+                });
+                match latest_release(emulator) {
+                    Ok(release) => {
+                        let applied_version = applied[&id]["version"].as_str().unwrap_or("");
+                        entry["latest_version"] = json!(release.version);
+                        entry["latest_published_at"] = json!(release.published_at);
+                        entry["download_url"] =
+                            json!(release.download_url.clone().unwrap_or_default());
+                        entry["release_url"] = json!(release.source_url);
+                        entry["has_update"] = json!(
+                            !release.version.is_empty() && release.version != applied_version
+                        );
+                    }
+                    Err(error) => {
+                        entry["error"] = json!(error.to_string());
+                    }
+                }
+                entries.push(entry);
+            }
+            Ok(json_response(200, json!({"emulators": entries})))
+        }
+        // Apply one selected update: server-side downloads the upstream
+        // release for the given OS, validates it is a zip (the bundle
+        // format every desktop client consumes), persists it under the
+        // shared `emulator-bundles/` store, and records the applied
+        // version. From this point on, every user's next "Install /
+        // Update" pulls the new bundle — no per-user action required.
+        (Method::Post, "/api/admin/apply-emulator-update") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !user["is_admin"].as_bool().unwrap_or(false) {
+                return Ok(json_response(403, json!({"error": "admin required"})));
+            }
+            let body = read_body(&mut request)?;
+            let id = body["emulator_id"].as_str().unwrap_or("").to_owned();
+            let target_os = body["os"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| "all".to_owned());
+            let Some(emulator) = emulator_by_id(&id) else {
+                return Ok(json_response(404, json!({"error": "unknown emulator id"})));
+            };
+            let release = match latest_release(&emulator) {
+                Ok(release) => release,
+                Err(error) => {
+                    return Ok(json_response(
+                        502,
+                        json!({"error": format!("failed to query upstream: {error}")}),
+                    ));
+                }
+            };
+            // Decide which OS targets to publish for. "all" attempts both;
+            // a specific value publishes only that bundle.
+            let targets: Vec<&str> = match target_os.as_str() {
+                "all" => vec!["windows", "linux"],
+                "windows" => vec!["windows"],
+                "linux" => vec!["linux"],
+                _ => {
+                    return Ok(json_response(
+                        400,
+                        json!({"error": "os must be 'windows', 'linux', or 'all'"}),
+                    ));
+                }
+            };
+            let mut published: Vec<Value> = Vec::new();
+            let mut errors: Vec<Value> = Vec::new();
+            for os in targets {
+                let asset_url = if os == current_os() {
+                    release.download_url.clone()
+                } else {
+                    // Re-poll to pick the asset for the other OS family.
+                    pick_asset(&release_assets(&emulator).unwrap_or_default(), os)
+                };
+                let Some(url) = asset_url else {
+                    errors.push(json!({
+                        "os": os,
+                        "error": format!("no upstream asset matched for {os}")
+                    }));
+                    continue;
+                };
+                if !url.starts_with("https://") {
+                    errors.push(json!({"os": os, "error": "asset URL must use HTTPS"}));
+                    continue;
+                }
+                let bytes = match ureq::get(&url)
+                    .header("User-Agent", "crash-crafts-game-sync")
+                    .call()
+                    .and_then(|r| r.into_body().read_to_vec())
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        errors.push(json!({
+                            "os": os,
+                            "error": format!("download failed: {error}")
+                        }));
+                        continue;
+                    }
+                };
+                if zip::ZipArchive::new(std::io::Cursor::new(&bytes)).is_err() {
+                    errors.push(json!({
+                        "os": os,
+                        "error": "upstream asset is not a zip; admin must repackage as a portable zip and upload via PUT /api/admin/emulator-bundle/{id}/{os}"
+                    }));
+                    continue;
+                }
+                let dir = state.data_dir.join("emulator-bundles").join(&id);
+                secure_create_dir_all(&dir)?;
+                let target_path = dir.join(format!("{os}.zip"));
+                fs::write(&target_path, &bytes)?;
+                published.push(json!({
+                    "os": os,
+                    "bytes": bytes.len(),
+                    "path": target_path.to_string_lossy()
+                }));
+            }
+            // Record the applied version so the next "Check for updates"
+            // call can compare against it.
+            if !published.is_empty() {
+                let store = state.store.lock().unwrap();
+                let mut data = store.read()?;
+                if !data["applied_emulator_versions"].is_object() {
+                    data["applied_emulator_versions"] = json!({});
+                }
+                data["applied_emulator_versions"][&id] = json!({
+                    "version": release.version,
+                    "published_at": release.published_at,
+                    "applied_at": unix_time(),
+                    "applied_by": user["email"].as_str().unwrap_or("")
+                });
+                store.write(&data)?;
+            }
+            Ok(json_response(
+                200,
+                json!({
+                    "ok": !published.is_empty(),
+                    "emulator_id": id,
+                    "applied_version": release.version,
+                    "published": published,
+                    "errors": errors
+                }),
             ))
         }
         (Method::Post, "/api/setup") => {
@@ -2436,6 +3144,18 @@ pub fn run_desktop_gui(args: &[String]) -> AppResult<()> {
         .ok_or("failed to determine local server address")?;
     let url = format!("http://{}:{}/", addr.ip(), addr.port());
     eprintln!("Crash Crafts Game Sync desktop GUI listening on {url}");
+    // Drop a port hint file so the Steam Deck Decky helper plugin (and any
+    // future per-OS launcher) can discover the local GUI without scanning.
+    let hint_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".local").join("state"))
+                .unwrap_or_else(std::env::temp_dir)
+        })
+        .join("crash-crafts-game-sync");
+    let _ = fs::create_dir_all(&hint_dir);
+    let _ = fs::write(hint_dir.join("gui-port"), addr.port().to_string());
     if !no_browser {
         let _ = open_in_browser(&url);
     }
@@ -2563,6 +3283,45 @@ fn handle_local_request(state: Arc<LocalGuiState>, mut request: Request) {
                 Err(error) => Ok(json_response(500, json!({"error": error.to_string()}))),
             }
         }
+        (Method::Post, "/api/local/enable-portable") => {
+            let body = read_body(&mut request)?;
+            let id = body["emulator_id"].as_str().unwrap_or("").to_owned();
+            let config = read_desktop_config(&state.config_path)?;
+            let Some(emulator) = emulator_by_id(&id) else {
+                return Ok(json_response(404, json!({"error": "unknown emulator id"})));
+            };
+            let mut detected_path: Option<PathBuf> = None;
+            for root in &config.emulator_roots {
+                let root_path = PathBuf::from(root);
+                if !root_path.exists() {
+                    continue;
+                }
+                for found in detect_emulators(&root_path) {
+                    if found["id"].as_str() == Some(&id)
+                        && let Some(path) = found["path"].as_str()
+                    {
+                        detected_path = Some(PathBuf::from(path));
+                    }
+                }
+            }
+            let Some(install_dir) = detected_path else {
+                return Ok(json_response(
+                    404,
+                    json!({"error": "emulator is not installed in any configured emulator root"}),
+                ));
+            };
+            match enable_portable_mode(&emulator, &install_dir) {
+                Ok(Some(path)) => Ok(json_response(
+                    200,
+                    json!({"ok": true, "path": path.to_string_lossy()}),
+                )),
+                Ok(None) => Ok(json_response(
+                    200,
+                    json!({"ok": true, "path": install_dir.to_string_lossy()}),
+                )),
+                Err(error) => Ok(json_response(500, json!({"error": error.to_string()}))),
+            }
+        }
         (Method::Get, "/api/local/srm") => {
             let config = read_desktop_config(&state.config_path)?;
             Ok(json_response(200, srm_status(&config)))
@@ -2672,6 +3431,17 @@ fn list_local_emulators(config: &DesktopConfig) -> Value {
             let id = emulator["id"].as_str().unwrap_or("").to_owned();
             let installed_match = detected.iter().find(|d| d["id"].as_str() == Some(&id));
             let installable = emulator_download_spec(&emulator, os).is_some();
+            // Auto-detect available updates from the upstream release feed.
+            // Network failures are tolerated so the GUI still loads when
+            // offline; the front-end shows "unknown" in that case.
+            let upstream = if emulator.get("release_source").is_some() {
+                latest_release(&emulator).ok()
+            } else {
+                None
+            };
+            let save_paths = installed_match
+                .and_then(|d| d["save_paths"].as_array().cloned())
+                .unwrap_or_default();
             json!({
                 "id": id,
                 "name": emulator["name"].as_str().unwrap_or(""),
@@ -2680,7 +3450,12 @@ fn list_local_emulators(config: &DesktopConfig) -> Value {
                 "installed": installed_match.is_some(),
                 "portable": installed_match.and_then(|d| d["portable"].as_bool()).unwrap_or(false),
                 "path": installed_match.and_then(|d| d["path"].as_str().map(str::to_owned)).unwrap_or_default(),
-                "installable": installable
+                "save_paths": save_paths,
+                "installable": installable,
+                "latest_version": upstream.as_ref().map(|r| r.version.clone()).unwrap_or_default(),
+                "latest_published_at": upstream.as_ref().map(|r| r.published_at.clone()).unwrap_or_default(),
+                "latest_download_url": upstream.as_ref().and_then(|r| r.download_url.clone()).unwrap_or_default(),
+                "release_url": upstream.as_ref().map(|r| r.source_url.clone()).unwrap_or_default()
             })
         })
         .collect::<Vec<_>>();
@@ -3006,6 +3781,168 @@ mod tests {
         let emulator = emulator_by_id("duckstation").unwrap();
         let files = collect_sync_files(&duck, &emulator).unwrap();
         assert_eq!(files, vec![duck.join("memcards/card.mcd")]);
+    }
+
+    #[test]
+    fn enable_portable_mode_creates_marker_file_idempotently() {
+        let temp = TempDir::new().unwrap();
+        let install_dir = temp.path().join("DuckStation");
+        fs::create_dir_all(&install_dir).unwrap();
+        let emulator = emulator_by_id("duckstation").unwrap();
+        let path = enable_portable_mode(&emulator, &install_dir)
+            .unwrap()
+            .unwrap();
+        assert!(path.ends_with("portable.txt"));
+        assert!(path.exists());
+        // Repeat invocation must not error and must not clobber any
+        // existing content the user may have hand-edited.
+        fs::write(&path, b"user-edited").unwrap();
+        let path_again = enable_portable_mode(&emulator, &install_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(path, path_again);
+        assert_eq!(fs::read(&path).unwrap(), b"user-edited");
+    }
+
+    #[test]
+    fn extract_bundle_skips_device_local_config_files_on_update_for_rpcs3() {
+        // Build a minimal in-memory zip that mimics a server-curated RPCS3
+        // bundle: a fresh executable plus a default config.yml. On a first
+        // install we want the config.yml to land so the emulator works out
+        // of the box. On a subsequent install (update), the user's hand-
+        // tuned config.yml MUST survive — the bundle's copy must be
+        // skipped.
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("rpcs3.exe", opts).unwrap();
+            zip.write_all(b"NEW-BINARY-v2").unwrap();
+            zip.start_file("config.yml", opts).unwrap();
+            zip.write_all(b"GPU: Default\n").unwrap();
+            zip.start_file("GuiConfigs/CurrentSettings.ini", opts).unwrap();
+            zip.write_all(b"theme=light").unwrap();
+            zip.finish().unwrap();
+        }
+        let temp = TempDir::new().unwrap();
+        let install_dir = temp.path().join("RPCS3");
+        let emulator = emulator_by_id("rpcs3-nightly").unwrap();
+        // First install: no skips, every file should land.
+        let skipped =
+            extract_bundle_into(&buf, &install_dir, &emulator, false).unwrap();
+        assert!(
+            skipped.is_empty(),
+            "first install must not skip anything, skipped={skipped:?}"
+        );
+        assert_eq!(
+            fs::read(install_dir.join("config.yml")).unwrap(),
+            b"GPU: Default\n"
+        );
+        // User now hand-edits config.yml with their device-specific GPU.
+        fs::write(install_dir.join("config.yml"), b"GPU: Vulkan\n").unwrap();
+        // Update: the bundle's config.yml MUST be skipped because RPCS3's
+        // sync_exclude lists it.
+        let skipped =
+            extract_bundle_into(&buf, &install_dir, &emulator, true).unwrap();
+        assert!(
+            skipped.iter().any(|p| p == "config.yml"),
+            "config.yml should have been skipped on update, skipped={skipped:?}"
+        );
+        // The user's hand-edited config.yml must be untouched.
+        assert_eq!(
+            fs::read(install_dir.join("config.yml")).unwrap(),
+            b"GPU: Vulkan\n"
+        );
+        // The binary should have been refreshed.
+        assert_eq!(
+            fs::read(install_dir.join("rpcs3.exe")).unwrap(),
+            b"NEW-BINARY-v2"
+        );
+    }
+
+    #[test]
+    fn extract_bundle_rejects_zip_slip_path() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("../escaped.txt", opts).unwrap();
+            zip.write_all(b"escape").unwrap();
+            zip.finish().unwrap();
+        }
+        let temp = TempDir::new().unwrap();
+        let install_dir = temp.path().join("emu");
+        fs::create_dir_all(&install_dir).unwrap();
+        let emulator = emulator_by_id("duckstation").unwrap();
+        let result = extract_bundle_into(&buf, &install_dir, &emulator, false);
+        assert!(result.is_err(), "zip-slip entry must be rejected");
+    }
+
+    #[test]
+    fn detect_emulators_reports_save_paths_for_each_emulator() {
+        let temp = TempDir::new().unwrap();
+        let cemu = temp.path().join("Cemu");
+        fs::create_dir_all(cemu.join("mlc01/usr/save")).unwrap();
+        fs::write(cemu.join("settings.xml"), b"").unwrap();
+        let found = detect_emulators(temp.path());
+        let cemu_entry = found.iter().find(|e| e["id"] == "cemu").unwrap();
+        let save_paths: Vec<&str> = cemu_entry["save_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert!(save_paths.iter().any(|p| p.ends_with("mlc01/usr/save")));
+    }
+
+    #[test]
+    fn manifest_has_release_source_and_save_paths_for_every_emulator() {
+        let manifest = manifest();
+        for emulator in manifest["emulators"].as_array().unwrap() {
+            let id = emulator["id"].as_str().unwrap();
+            assert!(
+                emulator.get("release_source").is_some(),
+                "{id} is missing release_source for upstream update detection"
+            );
+            assert!(
+                emulator["save_paths"]
+                    .as_array()
+                    .map(|arr| !arr.is_empty())
+                    .unwrap_or(false),
+                "{id} is missing save_paths for save-location auto-detection"
+            );
+            assert!(
+                emulator
+                    .get("portable_marker_to_create")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                "{id} is missing portable_marker_to_create for auto portable mode"
+            );
+        }
+    }
+
+    #[test]
+    fn pick_asset_matches_per_os_naming_conventions() {
+        let assets = json!([
+            {"name": "duckstation-windows-x64.zip", "browser_download_url": "https://example/win.zip"},
+            {"name": "duckstation-linux-x64.AppImage", "browser_download_url": "https://example/linux.AppImage"},
+            {"name": "Source code (zip)", "browser_download_url": "https://example/source.zip"}
+        ]);
+        assert_eq!(
+            pick_asset(&assets, "windows"),
+            Some("https://example/win.zip".to_owned())
+        );
+        assert_eq!(
+            pick_asset(&assets, "linux"),
+            Some("https://example/linux.AppImage".to_owned())
+        );
     }
 
     #[test]

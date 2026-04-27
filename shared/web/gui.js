@@ -162,7 +162,7 @@
     }
     const list = result.body.emulators || [];
     $("#emulators-table").innerHTML =
-      "<table class=\"data\"><thead><tr><th>Emulator</th><th>Installed</th><th>Portable</th><th>Path</th><th>Channels</th><th>Action</th></tr></thead><tbody>" +
+      "<table class=\"data\"><thead><tr><th>Emulator</th><th>Installed</th><th>Portable</th><th>Save folders</th><th>Latest upstream</th><th>Action</th></tr></thead><tbody>" +
       list
         .map(
           (em) =>
@@ -173,14 +173,29 @@
             "</span></td><td>" +
             (em.installed ? "yes" : "no") +
             "</td><td>" +
-            (em.portable ? "yes" : (em.installed ? "<span class=\"badge badge-warn\">portable required</span>" : "—")) +
-            "</td><td><code>" +
-            escapeHtml(em.path || "") +
-            "</code></td><td>" +
-            escapeHtml((em.channels || []).join(", ")) +
+            (em.portable
+              ? "yes"
+              : em.installed
+              ? '<button class="secondary" data-portable="' + escapeHtml(em.id) + '">Set portable</button>'
+              : "—") +
+            "</td><td>" +
+            ((em.save_paths || []).length
+              ? '<ul class="log-list">' +
+                em.save_paths.map((p) => "<li><code>" + escapeHtml(p) + "</code></li>").join("") +
+                "</ul>"
+              : '<span class="muted">—</span>') +
+            "</td><td>" +
+            (em.latest_version
+              ? '<a href="' +
+                escapeHtml(em.release_url) +
+                '" target="_blank" rel="noopener">' +
+                escapeHtml(em.latest_version) +
+                "</a>" +
+                (em.latest_published_at ? '<br><span class="muted">' + escapeHtml(em.latest_published_at) + "</span>" : "")
+              : '<span class="muted">unknown</span>') +
             "</td><td>" +
             (em.installable
-              ? '<button data-install="' + escapeHtml(em.id) + '">Install portable</button> '
+              ? '<button data-install="' + escapeHtml(em.id) + '">' + (em.installed ? "Update" : "Install portable") + "</button> "
               : '<a class="secondary" href="' + escapeHtml(em.homepage) + '" target="_blank" rel="noopener">Open homepage</a>') +
             "</td></tr>"
         )
@@ -190,11 +205,22 @@
       btn.addEventListener("click", async () => {
         const id = btn.getAttribute("data-install");
         btn.disabled = true;
+        const original = btn.textContent;
         btn.textContent = "Installing...";
         const r = await api("/api/local/install-emulator", { method: "POST", body: { emulator_id: id } });
         btn.disabled = false;
-        btn.textContent = "Install portable";
+        btn.textContent = original;
         alert(r.ok ? "Installed: " + r.body.path : (r.body.error || "Failed"));
+        loadEmulators();
+      })
+    );
+    $$("button[data-portable]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-portable");
+        btn.disabled = true;
+        btn.textContent = "Enabling...";
+        const r = await api("/api/local/enable-portable", { method: "POST", body: { emulator_id: id } });
+        alert(r.ok ? "Portable mode enabled at " + r.body.path : (r.body.error || "Failed"));
         loadEmulators();
       })
     );

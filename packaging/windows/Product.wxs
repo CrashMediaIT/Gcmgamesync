@@ -4,6 +4,7 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Crash Crafts Game Sync is already installed." />
     <Feature Id="Main" Title="Crash Crafts Game Sync" Level="1">
       <ComponentGroupRef Id="AppComponents" />
+      <ComponentGroupRef Id="ShortcutComponents" />
     </Feature>
   </Package>
 
@@ -11,14 +12,48 @@
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="INSTALLFOLDER" Name="Crash Crafts Game Sync" />
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Crash Crafts Game Sync" />
+    </StandardDirectory>
+    <StandardDirectory Id="StartupFolder" />
   </Fragment>
 
   <Fragment>
     <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
-      <Component Id="MainExecutable">
+      <!-- Headless daemon: registered as the CrashCraftsGameSync Windows
+           Service so background sync runs even when no user is logged on. -->
+      <Component Id="DaemonExecutable">
         <File Source="target/release/crash-crafts-game-sync.exe" KeyPath="yes" />
         <ServiceInstall Id="CrashCraftsGameSyncService" Name="CrashCraftsGameSync" DisplayName="Crash Crafts Game Sync" Description="Background emulator save synchronization daemon." Type="ownProcess" Start="auto" ErrorControl="normal" Arguments="daemon" />
         <ServiceControl Id="CrashCraftsGameSyncServiceControl" Name="CrashCraftsGameSync" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <!-- Per-user GUI binary: this is what users actually launch from the
+           Start menu and from the Startup folder shortcut. -->
+      <Component Id="GuiExecutable">
+        <File Id="GuiExe" Source="target/release/crash-crafts-game-sync-gui.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="ShortcutComponents">
+      <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="22222222-3333-4444-5555-666666666666">
+        <Shortcut Id="StartMenuGuiShortcut"
+                  Name="Crash Crafts Game Sync"
+                  Description="Manage emulator save sync, ROM library, and Steam ROM Manager presets"
+                  Target="[INSTALLFOLDER]crash-crafts-game-sync-gui.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveStartMenuFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\CrashMediaIT\CrashCraftsGameSync" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- Autostart shortcut so the GUI launches with Windows, OneDrive-style. -->
+      <Component Id="StartupShortcut" Directory="StartupFolder" Guid="33333333-4444-5555-6666-777777777777">
+        <Shortcut Id="StartupGuiShortcut"
+                  Name="Crash Crafts Game Sync"
+                  Description="Crash Crafts Game Sync desktop UI (autostart)"
+                  Target="[INSTALLFOLDER]crash-crafts-game-sync-gui.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\CrashMediaIT\CrashCraftsGameSync" Name="StartupShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

@@ -1,8 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=Crash Crafts Game Sync
-Comment=Configure emulator save synchronization and Steam ROM Manager presets
-Exec=crash-crafts-game-sync companion
-Terminal=true
+GenericName=Game Save Sync
+Comment=Sync emulator save files with the Crash Crafts Game Sync server and manage Steam ROM Manager presets
+Exec=crash-crafts-game-sync-gui
+Icon=crash-crafts-game-sync
+Terminal=false
 Categories=Game;Utility;
-StartupNotify=false
+Keywords=emulator;rom;steam;sync;save;backup;
+StartupNotify=true
+StartupWMClass=crash-crafts-game-sync-gui
