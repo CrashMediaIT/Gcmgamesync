@@ -59,7 +59,7 @@
     const uriEl = document.getElementById("setup-totp-uri");
     if (!panel || !qr || !uriEl) return;
     qr.replaceChildren();
-    if (svg && typeof svg === "string" && svg.indexOf("<svg") === 0) {
+    if (svg && typeof svg === "string" && (svg.indexOf("<?xml") === 0 || svg.indexOf("<svg") === 0)) {
       // The SVG is generated server-side from the otpauth URI; parse it
       // through DOMParser instead of innerHTML so any unexpected content
       // is rejected by the XML parser rather than executed as HTML.
