@@ -51,7 +51,7 @@ def write_versioned_file(root: Path, owner: str, rel_path: str, content: bytes) 
         shutil.copy2(base, versions / version_name)
         existing = sorted(versions.iterdir(), key=lambda p: p.name)
         historical_to_keep = max(VERSIONS_TO_KEEP - 1, 0)
-        for old in existing[:-historical_to_keep] if historical_to_keep else existing:
+        for old in existing[:-historical_to_keep] if historical_to_keep > 0 else []:
             old.unlink()
     if changed:
         base.write_bytes(content)

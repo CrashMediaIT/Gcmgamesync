@@ -12,11 +12,12 @@ from .scanner import MANIFEST, detect_emulators
 
 
 def post_json(url: str, payload: dict, token: str | None = None) -> dict:
+    validate_server_url(url)
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - user-configured server URL
+    with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -48,8 +49,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_log(args: argparse.Namespace) -> int:
     try:
-        server = validate_server_url(args.server)
-        result = post_json(f"{server.rstrip('/')}/api/logs", {"level": args.level, "message": args.message, "context": {"client": "gcmgamesync-cli"}}, args.token)
+        result = post_json(f"{args.server.rstrip('/')}/api/logs", {"level": args.level, "message": args.message, "context": {"client": "gcmgamesync-cli"}}, args.token)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -39,7 +39,7 @@ class GcmSmokeTests(unittest.TestCase):
             for index in range(2, 9):
                 write_versioned_file(root, "u@example.com", "saves/a.sav", str(index).encode())
             versions = list((root / "versions" / "u@example.com" / "saves" / "a.sav").iterdir())
-            self.assertLessEqual(len(versions), 4)
+            self.assertEqual(len(versions), 4)
 
     def test_client_requires_https_except_localhost(self):
         self.assertEqual(validate_server_url("https://sync.example.com"), "https://sync.example.com")

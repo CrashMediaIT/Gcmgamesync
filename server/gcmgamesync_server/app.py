@@ -13,6 +13,7 @@ from .storage import JsonStore, write_versioned_file
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = json.loads((ROOT / "shared" / "emulators.json").read_text(encoding="utf-8"))
+DUMMY_PASSWORD_HASH = hash_password("invalid-password-placeholder")
 
 UI_HTML = """<!doctype html>
 <html lang="en">
@@ -208,9 +209,9 @@ class GcmHandler(BaseHTTPRequestHandler):
                 return
             token = secrets.token_urlsafe(24)
             data["invites"][token] = {"email": email}
-            store_note = "Configure SMTP later; this invite token is returned for manual delivery."
+            email_delivery_note = "Configure SMTP later; this invite token is returned for manual delivery."
             self.store.write(data)
-            self._send(HTTPStatus.CREATED, {"email": email, "invite_token": token, "email_status": store_note})
+            self._send(HTTPStatus.CREATED, {"email": email, "invite_token": token, "email_status": email_delivery_note})
         elif parsed.path == "/api/register":
             token = body.get("invite_token", "")
             invite = data["invites"].get(token)
@@ -230,7 +231,10 @@ class GcmHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/login":
             email = body.get("email", "").strip().lower()
             user = data["users"].get(email)
-            if not user or not verify_password(body.get("password", ""), user.get("password_hash", "")) or not verify_totp(user.get("totp_secret", ""), body.get("totp_code", "")):
+            password_hash = user.get("password_hash", DUMMY_PASSWORD_HASH) if user else DUMMY_PASSWORD_HASH
+            password_ok = verify_password(body.get("password", ""), password_hash)
+            totp_ok = bool(user) and verify_totp(user.get("totp_secret", ""), body.get("totp_code", ""))
+            if not user or not password_ok or not totp_ok:
                 self._send(HTTPStatus.UNAUTHORIZED, {"error": "invalid credentials or 2fa code"})
                 return
             token = new_token()
