@@ -51,7 +51,7 @@ jobs:
       - name: Set date-based version (Linux)
         if: runner.os == 'Linux'
         run: |
-          VERSION="$(date -u +'%Y.%m%d').${{ github.run_number }}"
+          VERSION="$(date -u +'%Y').$((10#$(date -u +'%m%d'))).${{ github.run_number }}"
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
           sed -i "/^name = \"crash-crafts-game-sync\"/{n;s/^version = \".*\"/version = \"${VERSION}\"/}" Cargo.lock
 
@@ -59,7 +59,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = (Get-Date -Format "yyyy.MMdd") + ".${{ github.run_number }}"
+          $version = (Get-Date -Format "yyyy") + "." + [int](Get-Date -Format "MMdd") + ".${{ github.run_number }}"
           (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
           $content = Get-Content Cargo.lock
           $idx = ($content | Select-String -Pattern '^name = "crash-crafts-game-sync"' | Select-Object -First 1).LineNumber - 1
