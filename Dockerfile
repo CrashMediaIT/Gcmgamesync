@@ -19,12 +19,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /nonexistent --shell /usr/sbin/nologin ccgs \
-    && mkdir -p /data \
-    && chown -R ccgs:ccgs /data
+    && mkdir -p /data /config \
+    && chown -R ccgs:ccgs /data /config \
+    && chmod 700 /config
 COPY --from=builder /app/target/release/crash-crafts-game-sync /usr/local/bin/crash-crafts-game-sync
 COPY shared ./shared
 USER 10001:10001
-VOLUME ["/data"]
+VOLUME ["/data", "/config"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["crash-crafts-game-sync", "healthcheck"]
-CMD ["crash-crafts-game-sync", "server", "--host", "0.0.0.0", "--port", "8080", "--data-dir", "/data"]
+CMD ["crash-crafts-game-sync", "server", "--host", "0.0.0.0", "--port", "8080", "--data-dir", "/data", "--config-dir", "/config"]

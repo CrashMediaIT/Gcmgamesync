@@ -1337,15 +1337,41 @@ pub fn install_srm(config: &DesktopConfig) -> AppResult<PathBuf> {
 #[derive(Clone)]
 struct JsonStore {
     path: PathBuf,
+    cipher: chacha20poly1305::XChaCha20Poly1305,
 }
 
+/// Magic bytes identifying an encrypted state file. Lets the loader detect
+/// legacy plaintext state on disk and migrate it transparently.
+const STATE_MAGIC: &[u8; 4] = b"CCGS";
+/// Encrypted state file format version (allows future upgrades).
+const STATE_VERSION: u8 = 0x01;
+/// XChaCha20-Poly1305 nonce size in bytes.
+const STATE_NONCE_LEN: usize = 24;
+/// Length of the symmetric key used to encrypt the state file at rest.
+const STATE_KEY_LEN: usize = 32;
+
 impl JsonStore {
-    fn new(path: PathBuf) -> AppResult<Self> {
+    fn new(path: PathBuf, key_path: PathBuf) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            secure_create_dir_all(parent)?;
         }
-        let store = Self { path };
-        if !store.path.exists() {
+        if let Some(parent) = key_path.parent() {
+            secure_create_dir_all(parent)?;
+        }
+        let key = load_or_create_state_key(&key_path)?;
+        use chacha20poly1305::KeyInit;
+        let cipher = chacha20poly1305::XChaCha20Poly1305::new((&key).into());
+        let store = Self { path, cipher };
+        // Migrate any pre-existing plaintext state file to the encrypted
+        // format on first start so existing deployments keep working after
+        // upgrading to encryption-at-rest.
+        if store.path.exists() {
+            let existing = fs::read(&store.path)?;
+            if !is_encrypted_state(&existing) {
+                let plain: Value = serde_json::from_slice(&existing)?;
+                store.write(&plain)?;
+            }
+        } else {
             store.write(&json!({
                 "setup_complete": false,
                 "users": {},
@@ -1363,19 +1389,108 @@ impl JsonStore {
     }
 
     fn read(&self) -> AppResult<Value> {
-        Ok(serde_json::from_slice(&fs::read(&self.path)?)?)
+        let bytes = fs::read(&self.path)?;
+        if is_encrypted_state(&bytes) {
+            let plaintext = decrypt_state_bytes(&self.cipher, &bytes)?;
+            Ok(serde_json::from_slice(&plaintext)?)
+        } else {
+            // Defensive: a plaintext file should have been migrated by
+            // `new()`, but if one appears later (manual restore from
+            // backup, etc.) accept it and re-encrypt on the next write.
+            Ok(serde_json::from_slice(&bytes)?)
+        }
     }
 
     fn write(&self, data: &Value) -> AppResult<()> {
         if let Some(parent) = self.path.parent() {
             secure_create_dir_all(parent)?;
         }
+        let plaintext = serde_json::to_vec_pretty(data)?;
+        let encrypted = encrypt_state_bytes(&self.cipher, &plaintext)?;
         let tmp = self.path.with_extension("tmp");
         let mut file = fs::File::create(&tmp)?;
         secure_file(&file)?;
-        file.write_all(&serde_json::to_vec_pretty(data)?)?;
+        file.write_all(&encrypted)?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(tmp, &self.path)?;
         Ok(())
+    }
+}
+
+fn is_encrypted_state(bytes: &[u8]) -> bool {
+    bytes.len() > STATE_MAGIC.len() + 1 + STATE_NONCE_LEN
+        && &bytes[..STATE_MAGIC.len()] == STATE_MAGIC
+        && bytes[STATE_MAGIC.len()] == STATE_VERSION
+}
+
+fn encrypt_state_bytes(
+    cipher: &chacha20poly1305::XChaCha20Poly1305,
+    plaintext: &[u8],
+) -> AppResult<Vec<u8>> {
+    use chacha20poly1305::AeadCore;
+    use chacha20poly1305::aead::{Aead, OsRng};
+    let nonce = chacha20poly1305::XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|err| format!("failed to encrypt state file: {err}"))?;
+    let mut out = Vec::with_capacity(STATE_MAGIC.len() + 1 + nonce.len() + ciphertext.len());
+    out.extend_from_slice(STATE_MAGIC);
+    out.push(STATE_VERSION);
+    out.extend_from_slice(nonce.as_slice());
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+fn decrypt_state_bytes(
+    cipher: &chacha20poly1305::XChaCha20Poly1305,
+    bytes: &[u8],
+) -> AppResult<Vec<u8>> {
+    use chacha20poly1305::aead::Aead;
+    let header = STATE_MAGIC.len() + 1;
+    if bytes.len() < header + STATE_NONCE_LEN {
+        return Err("encrypted state file is truncated".into());
+    }
+    let nonce_bytes = &bytes[header..header + STATE_NONCE_LEN];
+    let ciphertext = &bytes[header + STATE_NONCE_LEN..];
+    let nonce = chacha20poly1305::XNonce::from_slice(nonce_bytes);
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| "failed to decrypt state file (wrong key or corrupted data)".into())
+}
+
+/// Load the encryption key for the state file from disk, generating a fresh
+/// random one on first start. The key file is created with 0600 permissions
+/// so only the service user can read it.
+fn load_or_create_state_key(path: &Path) -> AppResult<[u8; STATE_KEY_LEN]> {
+    if path.exists() {
+        let raw = fs::read_to_string(path)?;
+        let trimmed = raw.trim();
+        let decoded = general_purpose::STANDARD
+            .decode(trimmed)
+            .map_err(|err| format!("state key file is not valid base64: {err}"))?;
+        if decoded.len() != STATE_KEY_LEN {
+            return Err(format!(
+                "state key file must decode to {STATE_KEY_LEN} bytes, found {}",
+                decoded.len()
+            )
+            .into());
+        }
+        let mut key = [0u8; STATE_KEY_LEN];
+        key.copy_from_slice(&decoded);
+        Ok(key)
+    } else {
+        let key = random_bytes::<STATE_KEY_LEN>();
+        let encoded = general_purpose::STANDARD.encode(key);
+        let tmp = path.with_extension("tmp");
+        let mut file = fs::File::create(&tmp)?;
+        secure_file(&file)?;
+        file.write_all(encoded.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(tmp, path)?;
+        Ok(key)
     }
 }
 
@@ -1488,6 +1603,22 @@ fn otpauth_uri(email: &str, secret: &str) -> String {
     format!(
         "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30"
     )
+}
+
+/// Render the supplied `otpauth://` URI as a self-contained SVG QR code so
+/// the Web UI can display it during first-run setup and invite registration
+/// without depending on any third-party JavaScript or external image hosts
+/// (the page's CSP forbids both).
+fn otpauth_qr_svg(uri: &str) -> String {
+    match qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M) {
+        Ok(code) => code
+            .render::<qrcode::render::svg::Color>()
+            .min_dimensions(240, 240)
+            .dark_color(qrcode::render::svg::Color("#000000"))
+            .light_color(qrcode::render::svg::Color("#ffffff"))
+            .build(),
+        Err(_) => String::new(),
+    }
 }
 
 fn new_token() -> String {
@@ -1857,11 +1988,26 @@ fn write_versioned_file(
 
 struct AppState {
     data_dir: PathBuf,
+    #[allow(dead_code)]
+    config_dir: PathBuf,
     store: Mutex<JsonStore>,
 }
 
-fn bootstrap_store(data_dir: &Path) -> AppResult<JsonStore> {
-    let store = JsonStore::new(data_dir.join("state.json"))?;
+fn bootstrap_store(config_dir: &Path, data_dir: &Path) -> AppResult<JsonStore> {
+    let state_path = config_dir.join("state.json");
+    let key_path = config_dir.join("state.key");
+    // Backwards compatibility: existing deployments stored `state.json`
+    // directly in the data directory. If we find a legacy file there and
+    // the new config directory has none, move it across before opening so
+    // the encrypted store picks it up and re-encrypts on first write.
+    let legacy_state = data_dir.join("state.json");
+    if !state_path.exists() && legacy_state.exists() && legacy_state != state_path {
+        if let Some(parent) = state_path.parent() {
+            secure_create_dir_all(parent)?;
+        }
+        fs::rename(&legacy_state, &state_path)?;
+    }
+    let store = JsonStore::new(state_path, key_path)?;
     let mut data = store.read()?;
     let changed = ensure_state_defaults(&mut data);
     if changed {
@@ -2038,6 +2184,14 @@ fn render_ui(data: &Value) -> String {
       <button type="submit">Complete secure setup</button>
       <p id="setup-result" class="result"></p>
     </form>
+    <div id="setup-totp" class="hidden">
+      <h3>Scan this QR code with your authenticator</h3>
+      <p>Open Microsoft Authenticator, Google Authenticator, 1Password, Authy, or any TOTP app and scan the code below to enroll the admin account. 2FA is required to sign in.</p>
+      <div id="setup-totp-qr" class="totp-qr" aria-label="TOTP enrollment QR code"></div>
+      <p class="muted">If you cannot scan the code, paste this URI into your authenticator instead:</p>
+      <p><code id="setup-totp-uri"></code></p>
+      <button id="setup-totp-continue" type="button">I have enrolled — continue to sign in</button>
+    </div>
   </section>
 
   <section id="login-panel" class="card panel-grid hidden">
@@ -2173,6 +2327,8 @@ body:not(.is-admin) .admin-only { display: none !important; }
 .toggle { display: flex; align-items: center; gap: 10px; }
 .toggle input { width: auto; }
 @media (max-width: 820px) { .panel-grid, .card-pair { grid-template-columns: 1fr; } .form.inline { grid-template-columns: 1fr; } }
+.totp-qr { background: #fff; padding: 12px; border-radius: 12px; display: inline-block; margin: 12px 0; max-width: 280px; }
+.totp-qr svg { display: block; width: 100%; height: auto; }
 "#;
 
 fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -2189,6 +2345,13 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<std::io:
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
         ("Referrer-Policy", "no-referrer"),
+        // Browsers ignore HSTS over plain HTTP, so this is safe to set
+        // unconditionally and instructs any HTTPS-fronted deployment to
+        // pin the connection to TLS for the next year.
+        (
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        ),
         (
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
@@ -2660,10 +2823,11 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             });
             data["setup_complete"] = json!(true);
             let otpauth = otpauth_uri(&email, &secret);
+            let qr_svg = otpauth_qr_svg(&otpauth);
             store.write(&data)?;
             Ok(json_response(
                 201,
-                json!({"ok": true, "email": email, "otpauth_uri": otpauth}),
+                json!({"ok": true, "email": email, "otpauth_uri": otpauth, "otpauth_qr_svg": qr_svg}),
             ))
         }
         (Method::Get, "/api/users") => {
@@ -2784,9 +2948,11 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 invites.remove(invite_token);
             }
             store.write(&data)?;
+            let otpauth = otpauth_uri(&email, &secret);
+            let qr_svg = otpauth_qr_svg(&otpauth);
             Ok(json_response(
                 201,
-                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth_uri(&email, &secret)}),
+                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_svg": qr_svg}),
             ))
         }
         (Method::Post, "/api/login") => {
@@ -3201,14 +3367,30 @@ fn optional_arg_value(args: &[String], name: &str, fallback: &str) -> String {
 
 fn run_server(args: &[String]) -> AppResult<()> {
     let data_dir = PathBuf::from(optional_arg_value(args, "--data-dir", "/data"));
+    let config_dir = PathBuf::from(optional_arg_value(args, "--config-dir", "/config"));
     let host = optional_arg_value(args, "--host", "127.0.0.1");
     let port = optional_arg_value(args, "--port", "8080");
     let server = Server::http(format!("{host}:{port}"))?;
     let state = Arc::new(AppState {
         data_dir: data_dir.clone(),
-        store: Mutex::new(bootstrap_store(&data_dir)?),
+        config_dir: config_dir.clone(),
+        store: Mutex::new(bootstrap_store(&config_dir, &data_dir)?),
     });
     println!("{APP_NAME} server listening on http://{host}:{port}");
+    println!(
+        "  config dir: {}  data dir: {}",
+        config_dir.display(),
+        data_dir.display()
+    );
+    println!(
+        "  state-at-rest: encrypted (XChaCha20-Poly1305, key in {}/state.key)",
+        config_dir.display()
+    );
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        eprintln!(
+            "warning: serving plain HTTP on {host}; terminate TLS at a reverse proxy so traffic is encrypted in transit"
+        );
+    }
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
         std::thread::spawn(move || handle_request(request, state));
@@ -3848,7 +4030,7 @@ fn print_usage() {
         "usage:
    crash-crafts-game-sync gui [--config <path>] [--host 127.0.0.1] [--port 0] [--no-browser]
    crash-crafts-game-sync companion [--config <path>]
-   crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
+   crash-crafts-game-sync server [--host 127.0.0.1] [--port 8080] [--data-dir /data] [--config-dir /config]
    crash-crafts-game-sync manifest
    crash-crafts-game-sync scan --root <path>
    crash-crafts-game-sync status --root <path>
@@ -4096,10 +4278,53 @@ mod tests {
     #[test]
     fn new_store_starts_unconfigured_with_app_name() {
         let temp = TempDir::new().unwrap();
-        let store = JsonStore::new(temp.path().join("state.json")).unwrap();
+        let store = JsonStore::new(
+            temp.path().join("state.json"),
+            temp.path().join("state.key"),
+        )
+        .unwrap();
         let data = store.read().unwrap();
         assert_eq!(data["setup_complete"], false);
         assert_eq!(data["settings"]["app_name"], APP_NAME);
+    }
+
+    #[test]
+    fn store_encrypts_state_on_disk_and_round_trips() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("state.json");
+        let key_path = temp.path().join("state.key");
+        let store = JsonStore::new(state_path.clone(), key_path.clone()).unwrap();
+        store
+            .write(&json!({"setup_complete": true, "secret_marker": "tenant-id-abc-123"}))
+            .unwrap();
+        let raw = std::fs::read(&state_path).unwrap();
+        // The encrypted file must start with the magic header and must
+        // not contain the plaintext marker anywhere.
+        assert!(is_encrypted_state(&raw));
+        assert!(
+            !raw.windows(b"tenant-id-abc-123".len())
+                .any(|w| w == b"tenant-id-abc-123")
+        );
+        // Reopening with the same key must decrypt back to the original.
+        let reopened = JsonStore::new(state_path.clone(), key_path).unwrap();
+        let data = reopened.read().unwrap();
+        assert_eq!(data["secret_marker"], "tenant-id-abc-123");
+        // A different key must fail to decrypt the existing file.
+        let other_key = temp.path().join("other.key");
+        let wrong = JsonStore::new(state_path, other_key).unwrap();
+        assert!(wrong.read().is_err());
+    }
+
+    #[test]
+    fn store_migrates_legacy_plaintext_state_file() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("state.json");
+        let key_path = temp.path().join("state.key");
+        std::fs::write(&state_path, br#"{"setup_complete":true,"settings":{}}"#).unwrap();
+        let store = JsonStore::new(state_path.clone(), key_path).unwrap();
+        let raw = std::fs::read(&state_path).unwrap();
+        assert!(is_encrypted_state(&raw));
+        assert_eq!(store.read().unwrap()["setup_complete"], true);
     }
 
     #[test]
@@ -4686,8 +4911,15 @@ mod tests {
         let server_data = server_dir.path().to_path_buf();
         let listener = Server::http(&bind).unwrap();
         let state = Arc::new(AppState {
-            store: Mutex::new(JsonStore::new(server_data.join("state.json")).unwrap()),
+            store: Mutex::new(
+                JsonStore::new(
+                    server_data.join("state.json"),
+                    server_data.join("state.key"),
+                )
+                .unwrap(),
+            ),
             data_dir: server_data.clone(),
+            config_dir: server_data.clone(),
         });
         let server_state = Arc::clone(&state);
         let handle = std::thread::spawn(move || {
@@ -4716,6 +4948,16 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("otpauth://")
+        );
+        assert!(
+            setup["otpauth_qr_svg"]
+                .as_str()
+                .unwrap()
+                .starts_with("<?xml")
+                || setup["otpauth_qr_svg"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("<svg")
         );
         // Mint an admin session by injecting one directly so the test does
         // not need a real TOTP roundtrip.

@@ -26,7 +26,7 @@ Crash Crafts Game Sync is an emulator save backup and synchronization platform f
 
 ### Docker server + Web UI
 
-- First-run setup wizard — admin account, required TOTP 2FA, Office365 OAuth SMTP metadata, and uploaded logo, all stored in the `/data` volume.
+- First-run setup wizard — admin account, required TOTP 2FA (a QR code is shown after creating the admin so you can enroll an authenticator before the first sign-in), Office365 OAuth SMTP metadata, and uploaded logo, all stored in the encrypted `/config` volume.
 - Multi-view single-page Web UI served from `/`: Login, Dashboard, Devices, Files, Users / Invites, Logs, Settings, and Emulators (admin).
 - **File version history with one-click Restore.** Restoring an older version snapshots the current file as a new version first, so newer versions are preserved and the revert can itself be undone.
 - Versioned save storage (current copy plus retained older copies, configurable retention).
@@ -84,9 +84,14 @@ docker pull ghcr.io/crashmediait/gcmgamesync:latest
 docker compose up
 ```
 
-The container listens on **port `8080` inside the container**, mapped to **`8080` on the host** by `docker-compose.yml`. Persistent state (setup, users, invites, sessions, files, versions, uploaded logo, emulator bundles) lives in the `crash-crafts-game-sync-data` Docker volume mounted at `/data`.
+The container listens on **port `8080` inside the container**, mapped to **`8080` on the host** by `docker-compose.yml`. It uses two persistent Docker volumes:
 
-Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment, optional Office365 SMTP for invite emails, optional logo upload).
+- `crash-crafts-game-sync-config` mounted at **`/config`** — holds the encrypted application state (`state.json`) and the symmetric key (`state.key`) used to encrypt it. State at rest is encrypted with XChaCha20-Poly1305; the key file is generated on first start with `0600` permissions and never leaves the volume. Back up `/config` (state + key together) to be able to restore.
+- `crash-crafts-game-sync-data` mounted at **`/data`** — holds synchronized save files, version history, uploaded logo, and downloaded emulator bundles.
+
+**Encryption in transit:** the server itself speaks plain HTTP on `8080` and is intended to run behind an HTTPS reverse proxy (Caddy, nginx, Traefik, Cloudflare Tunnel, …); see *Put the server behind HTTPS* below. Responses always include `Strict-Transport-Security` so browsers pin the connection to TLS once HTTPS is reached. Desktop clients refuse to connect to non-localhost servers over plain `http://`.
+
+Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment via the displayed QR code, optional Office365 SMTP for invite emails, optional logo upload).
 
 ### 2. Put the server behind HTTPS
 
@@ -159,7 +164,7 @@ The setup form asks for three values:
 1. Open the Docker server and complete the first-run setup page.
 2. Paste the **tenant ID** (GUID) and **client ID** (GUID).
 3. Enter the **From email** — the licensed mailbox you enabled SMTP AUTH on.
-4. Submit. The server stores `provider=office365`, `auth=oauth2`, `tenant_id`, `client_id`, and `from_email` in `/data/state.json`. No password or refresh token is ever stored in the container.
+4. Submit. The server stores `provider=office365`, `auth=oauth2`, `tenant_id`, `client_id`, and `from_email` in the encrypted `/config/state.json`. No password or refresh token is ever stored in the container.
 
 ### Sending the first invite
 
@@ -179,7 +184,7 @@ Modern dark, glass-style UI with orange and cyan neon accents. The CSS lives in 
 ## Run without Docker
 
 ```bash
-cargo run --bin crash-crafts-game-sync -- server [--host 127.0.0.1] [--port 8080] [--data-dir /data]
+cargo run --bin crash-crafts-game-sync -- server [--host 127.0.0.1] [--port 8080] [--data-dir /data] [--config-dir /config]
 ```
 
 ## Advanced / scripting (CLI)

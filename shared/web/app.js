@@ -50,6 +50,31 @@
     el.dataset.kind = kind || "info";
   }
 
+  // Render the TOTP enrollment QR returned by /api/setup so the admin can
+  // scan it with their authenticator before being asked for a TOTP code on
+  // the sign-in page.
+  function showTotpEnrollment(uri, svg) {
+    const panel = document.getElementById("setup-totp");
+    const qr = document.getElementById("setup-totp-qr");
+    const uriEl = document.getElementById("setup-totp-uri");
+    if (!panel || !qr || !uriEl) return;
+    qr.replaceChildren();
+    if (svg && typeof svg === "string" && svg.indexOf("<svg") === 0) {
+      // The SVG is generated server-side from the otpauth URI; parse it
+      // through DOMParser instead of innerHTML so any unexpected content
+      // is rejected by the XML parser rather than executed as HTML.
+      const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+      const root = parsed.documentElement;
+      if (root && root.nodeName.toLowerCase() === "svg") {
+        qr.appendChild(document.importNode(root, true));
+      }
+    }
+    uriEl.textContent = uri || "";
+    panel.classList.remove("hidden");
+    const form = document.getElementById("setup-form");
+    if (form) form.classList.add("hidden");
+  }
+
   function escapeHtml(value) {
     return String(value == null ? "" : value)
       .replace(/&/g, "&amp;")
@@ -584,14 +609,21 @@
         if (result.ok) {
           setMessage(
             "setup-result",
-            "Setup complete. Save this TOTP URI in your authenticator: " + result.body.otpauth_uri,
+            "Setup complete. Scan the QR code below to enroll your authenticator before signing in.",
             "good"
           );
           state.setupComplete = true;
-          setTimeout(showAuth, 200);
+          showTotpEnrollment(result.body.otpauth_uri, result.body.otpauth_qr_svg);
         } else {
           setMessage("setup-result", result.body.error || "Setup failed.", "error");
         }
+      });
+    }
+
+    const totpContinue = document.getElementById("setup-totp-continue");
+    if (totpContinue) {
+      totpContinue.addEventListener("click", () => {
+        showAuth();
       });
     }
 

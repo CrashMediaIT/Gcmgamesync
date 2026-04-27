@@ -2,7 +2,7 @@
 
 ## Server
 
-The server is a Docker-friendly Rust HTTP service with a first-run Web UI setup. It stores users, sessions, invites, Office365 OAuth SMTP metadata, uploaded branding, and recent logs in a JSON state file under `/data`, and stores synchronized files under `/data/files/{user}`. When a changed file is replaced, the previous copy is moved to `/data/versions/{user}` and pruned so each file has at most five total copies including the current copy.
+The server is a Docker-friendly Rust HTTP service with a first-run Web UI setup. It stores users, sessions, invites, Office365 OAuth SMTP metadata, uploaded branding, and recent logs in an encrypted JSON state file at `/config/state.json` (XChaCha20-Poly1305 with the symmetric key in `/config/state.key`, generated on first start with `0600` permissions) and stores synchronized files under `/data/files/{user}`. When a changed file is replaced, the previous copy is moved to `/data/versions/{user}` and pruned so each file has at most five total copies including the current copy. The two volumes are mounted separately so backups can keep configuration and synced data on different schedules; legacy installs that had `state.json` under `/data` are migrated into `/config` automatically on first start. Encryption in transit is delegated to an HTTPS reverse proxy in front of the container; responses always set `Strict-Transport-Security` so browsers pin the connection to TLS once HTTPS is reached.
 
 ## Client
 

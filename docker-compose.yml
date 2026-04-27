@@ -13,5 +13,7 @@ services:
       - /tmp
     volumes:
       - crash-crafts-game-sync-data:/data
+      - crash-crafts-game-sync-config:/config
 volumes:
   crash-crafts-game-sync-data:
+  crash-crafts-game-sync-config:
