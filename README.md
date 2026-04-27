@@ -8,6 +8,10 @@ Crash Crafts Game Sync is an emulator save backup and synchronization platform. 
 
 ![Crash Crafts Game Sync Docker pull and CLI output](docs/screenshots/cli-status.svg)
 
+![Crash Crafts Game Sync desktop companion output](docs/screenshots/desktop-companion.svg)
+
+![Crash Crafts Game Sync desktop package outputs](docs/screenshots/desktop-packages.svg)
+
 ## Goals
 
 - Synchronize emulator saves across devices.
@@ -71,11 +75,12 @@ explicitly configured remote paths, and generates Steam ROM Manager parser prese
 
 ## Desktop packaging direction
 
+- Linux release builds publish a raw tarball plus `.deb`, `.rpm`, and AUR `PKGBUILD`
+  companion packages. Each installs the same Rust binary, desktop launcher, and
+  systemd user service so Debian/Ubuntu, RPM-based distributions, and Arch/AUR users
+  can install the desktop companion natively.
 - Windows builds should ship as an MSI that installs the Rust daemon as the
   `CrashCraftsGameSync` Windows Service. A WiX template is in `packaging/windows/Product.wxs`.
-- Linux builds should ship native packages first (`.deb`, then `.rpm` as needed) with a systemd
-  user service from `packaging/linux/crash-crafts-game-sync.service` and a desktop entry from
-  `packaging/linux/crash-crafts-game-sync.desktop`.
 - Steam Deck game mode should use a Decky Loader companion plugin manifest in
   `packaging/steam-deck/decky-plugin/plugin.json`; the plugin should control/status the daemon
   rather than sync files itself.

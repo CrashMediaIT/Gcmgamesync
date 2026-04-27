@@ -1,0 +1,27 @@
+pkgname=crash-crafts-game-sync
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Desktop companion for the Docker-hosted Crash Crafts Game Sync server'
+arch=('x86_64')
+url='https://github.com/CrashMediaIT/Gcmgamesync'
+license=('custom')
+depends=('ca-certificates' 'gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+source=("Gcmgamesync::git+https://github.com/CrashMediaIT/Gcmgamesync.git#tag=v${pkgver}"
+        'crash-crafts-game-sync.desktop'
+        'crash-crafts-game-sync.service')
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP')
+
+build() {
+  cd Gcmgamesync
+  cargo build --release --locked
+}
+
+package() {
+  cd Gcmgamesync
+  install -Dm0755 target/release/crash-crafts-game-sync "${pkgdir}/usr/bin/crash-crafts-game-sync"
+  install -Dm0644 "${srcdir}/crash-crafts-game-sync.desktop" "${pkgdir}/usr/share/applications/crash-crafts-game-sync.desktop"
+  install -Dm0644 "${srcdir}/crash-crafts-game-sync.service" "${pkgdir}/usr/lib/systemd/user/crash-crafts-game-sync.service"
+}

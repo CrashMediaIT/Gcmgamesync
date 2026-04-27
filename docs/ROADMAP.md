@@ -16,5 +16,5 @@
 
 ## Desktop packaging foundation
 - Build Windows as MSI with Windows Service registration.
-- Build Linux as native packages using a systemd user service before considering Flatpak.
+- Build Linux as native Debian, RPM, and AUR companion packages using a systemd user service before considering Flatpak.
 - Keep the Steam Deck plugin as a game-mode companion for status/control rather than the sync engine.

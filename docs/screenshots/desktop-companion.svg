@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">Crash Crafts Game Sync desktop companion screenshot</title>
+  <desc id="desc">Terminal-style screenshot of the desktop companion status output for the Docker-hosted sync server.</desc>
+  <rect width="1200" height="620" fill="#070a12"/>
+  <circle cx="150" cy="60" r="220" fill="#ff7a1a" opacity=".18"/>
+  <circle cx="1050" cy="80" r="250" fill="#22d3ee" opacity=".16"/>
+  <rect x="70" y="50" width="1060" height="520" rx="24" fill="#0c121f" stroke="#ffffff" stroke-opacity=".14"/>
+  <rect x="70" y="50" width="1060" height="58" rx="24" fill="#111827"/>
+  <circle cx="104" cy="79" r="8" fill="#ff5f56"/>
+  <circle cx="132" cy="79" r="8" fill="#ffbd2e"/>
+  <circle cx="160" cy="79" r="8" fill="#27c93f"/>
+  <text x="198" y="86" fill="#aab7cf" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">crash-crafts-game-sync companion</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">
+    <text x="112" y="154" fill="#22d3ee">$ crash-crafts-game-sync companion</text>
+    <text x="112" y="196" fill="#f8fafc">{</text>
+    <text x="144" y="232" fill="#f8fafc">"mode": "desktop_companion",</text>
+    <text x="144" y="268" fill="#f8fafc">"docker_server_url": "https://sync.example.com",</text>
+    <text x="144" y="304" fill="#f8fafc">"configured": false,</text>
+    <text x="144" y="340" fill="#f8fafc">"auth_token_configured": false,</text>
+    <text x="144" y="376" fill="#f8fafc">"sync_roots": [],</text>
+    <text x="144" y="412" fill="#7ee787">"next_steps": [</text>
+    <text x="176" y="448" fill="#aab7cf">"Run setup-desktop with the Docker server URL, user token, ROM roots, and emulator roots.",</text>
+    <text x="176" y="484" fill="#aab7cf">"Start daemon after setup to sync saves with the Docker server."</text>
+    <text x="144" y="520" fill="#7ee787">]</text>
+    <text x="112" y="556" fill="#f8fafc">}</text>
+  </g>
+</svg>
