@@ -16,6 +16,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const MANIFEST_JSON: &str = include_str!("../shared/emulators.json");
 const APP_NAME: &str = "Crash Crafts Game Sync";
 const PASSWORD_ITERATIONS: u32 = 240_000;
+const MAX_LOGO_BYTES: usize = 262_144;
+const MAX_LOGO_BASE64_SIZE: usize = 349_528;
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -431,11 +433,11 @@ fn validate_logo_data_url(data_url: &str) -> AppResult<()> {
     ) {
         return Err("logo must be a PNG, JPEG, or SVG data URL".into());
     }
-    if payload.len() > 349_528 {
+    if payload.len() > MAX_LOGO_BASE64_SIZE {
         return Err("logo must be smaller than 256 KiB".into());
     }
     let decoded = general_purpose::STANDARD.decode(payload)?;
-    if decoded.len() > 262_144 {
+    if decoded.len() > MAX_LOGO_BYTES {
         return Err("logo must be smaller than 256 KiB".into());
     }
     Ok(())
@@ -461,7 +463,7 @@ fn render_ui(data: &Value) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| {
             format!(
-                r#"<img class="mark logo-img" src="{}" alt="">"#,
+                r#"<img class="mark logo-img" src="{}" alt="Crash Crafts Game Sync logo">"#,
                 escape_html(value)
             )
         })
