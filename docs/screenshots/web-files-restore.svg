@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Crash Crafts Game Sync Files view with non-destructive Restore</title>
+  <desc id="desc">Files browser in the Web UI with version history per save and a Restore button that snapshots the current file as a new version before promoting the chosen older content.</desc>
+  <defs>
+    <linearGradient id="bg2" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b0f1a"/>
+      <stop offset="1" stop-color="#101727"/>
+    </linearGradient>
+    <linearGradient id="accent2" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#ff7a18"/>
+      <stop offset="1" stop-color="#23d5ab"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="720" fill="url(#bg2)"/>
+  <rect x="0" y="0" width="220" height="720" fill="#0a0f1c"/>
+  <text x="24" y="48" fill="url(#accent2)" font-family="Inter,Arial" font-size="20" font-weight="700">Crash Crafts</text>
+  <g font-family="Inter,Arial" font-size="14" fill="#b9c4dc">
+    <text x="28" y="129">Dashboard</text>
+    <text x="28" y="161">Devices</text>
+    <rect x="12" y="172" width="196" height="32" rx="6" fill="#172238"/>
+    <text x="28" y="193" fill="#ffffff">Files</text>
+    <text x="28" y="225">Users / Invites</text>
+    <text x="28" y="257">Logs</text>
+    <text x="28" y="289">Emulators (admin)</text>
+    <text x="28" y="321">Settings</text>
+  </g>
+  <rect x="220" y="0" width="980" height="64" fill="#0d1424"/>
+  <text x="244" y="40" fill="#ffffff" font-family="Inter,Arial" font-size="18" font-weight="600">Files</text>
+  <!-- File table -->
+  <g font-family="Inter,Arial">
+    <rect x="244" y="92" width="540" height="540" rx="10" fill="#0f1828" stroke="#1f2c47"/>
+    <g fill="#7d8aa6" font-size="12">
+      <text x="264" y="120">PATH</text>
+      <text x="500" y="120">SIZE</text>
+      <text x="580" y="120">VERS</text>
+      <text x="640" y="120">MODIFIED</text>
+    </g>
+    <g fill="#dde6f7" font-size="13">
+      <text x="264" y="150">duckstation/memcards/card1.mcd</text>
+      <text x="500" y="150">128 KiB</text>
+      <text x="580" y="150">5</text>
+      <text x="640" y="150">2m ago</text>
+      <rect x="720" y="138" width="48" height="20" rx="4" fill="#172238" stroke="#23d5ab"/>
+      <text x="744" y="153" text-anchor="middle" fill="#23d5ab" font-size="11">Versions</text>
+
+      <text x="264" y="180">pcsx2/memcards/Mcd001.ps2</text>
+      <text x="500" y="180">8 MiB</text>
+      <text x="580" y="180">5</text>
+      <text x="640" y="180">14m ago</text>
+      <rect x="720" y="168" width="48" height="20" rx="4" fill="#172238" stroke="#23d5ab"/>
+      <text x="744" y="183" text-anchor="middle" fill="#23d5ab" font-size="11">Versions</text>
+
+      <text x="264" y="210">rpcs3/dev_hdd0/home/00000001/savedata</text>
+      <text x="500" y="210">2.4 MiB</text>
+      <text x="580" y="210">3</text>
+      <text x="640" y="210">1h ago</text>
+      <rect x="720" y="198" width="48" height="20" rx="4" fill="#172238" stroke="#23d5ab"/>
+      <text x="744" y="213" text-anchor="middle" fill="#23d5ab" font-size="11">Versions</text>
+
+      <text x="264" y="240">cemu/mlc01/usr/save/00050000</text>
+      <text x="500" y="240">512 KiB</text>
+      <text x="580" y="240">2</text>
+      <text x="640" y="240">3h ago</text>
+      <rect x="720" y="228" width="48" height="20" rx="4" fill="#172238" stroke="#23d5ab"/>
+      <text x="744" y="243" text-anchor="middle" fill="#23d5ab" font-size="11">Versions</text>
+    </g>
+  </g>
+  <!-- Versions panel -->
+  <g font-family="Inter,Arial">
+    <rect x="804" y="92" width="372" height="540" rx="10" fill="#0f1828" stroke="#1f2c47"/>
+    <text x="824" y="124" fill="#ffffff" font-size="15" font-weight="600">Versions for</text>
+    <text x="824" y="146" fill="#23d5ab" font-size="13">duckstation/memcards/card1.mcd</text>
+    <foreignObject x="824" y="158" width="332" height="60">
+      <div xmlns="http://www.w3.org/1999/xhtml" style="font:11px Inter,Arial;color:#7d8aa6;line-height:1.4">
+        Restoring an older version snapshots the current file as a new version first, so newer versions are preserved and the revert can itself be undone.
+      </div>
+    </foreignObject>
+    <g fill="#dde6f7" font-size="12">
+      <text x="824" y="240">1714183421-Aa3F · 128 KiB</text>
+      <rect x="1064" y="226" width="92" height="22" rx="4" fill="#ff7a18"/>
+      <text x="1110" y="241" text-anchor="middle" fill="#0b0f1a" font-size="11" font-weight="600">Restore</text>
+
+      <text x="824" y="278">1714181233-9KqZ · 128 KiB</text>
+      <rect x="1064" y="264" width="92" height="22" rx="4" fill="#172238" stroke="#ff7a18"/>
+      <text x="1110" y="279" text-anchor="middle" fill="#ff7a18" font-size="11" font-weight="600">Restore</text>
+
+      <text x="824" y="316">1714177812-bL2m · 127 KiB</text>
+      <rect x="1064" y="302" width="92" height="22" rx="4" fill="#172238" stroke="#ff7a18"/>
+      <text x="1110" y="317" text-anchor="middle" fill="#ff7a18" font-size="11" font-weight="600">Restore</text>
+
+      <text x="824" y="354">1714152244-PpQw · 126 KiB</text>
+      <rect x="1064" y="340" width="92" height="22" rx="4" fill="#172238" stroke="#ff7a18"/>
+      <text x="1110" y="355" text-anchor="middle" fill="#ff7a18" font-size="11" font-weight="600">Restore</text>
+
+      <text x="824" y="392">1714098112-Mn4t · 124 KiB</text>
+      <rect x="1064" y="378" width="92" height="22" rx="4" fill="#172238" stroke="#ff7a18"/>
+      <text x="1110" y="393" text-anchor="middle" fill="#ff7a18" font-size="11" font-weight="600">Restore</text>
+    </g>
+    <text x="824" y="610" fill="#23d5ab" font-size="11">Restored. Devices will receive the reverted file on their next sync.</text>
+  </g>
+</svg>

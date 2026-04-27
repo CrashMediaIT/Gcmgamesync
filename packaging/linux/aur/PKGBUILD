@@ -1,11 +1,13 @@
 pkgname=crash-crafts-game-sync
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Desktop companion for the Docker-hosted Crash Crafts Game Sync server'
+pkgdesc='Desktop GUI and sync daemon for the Docker-hosted Crash Crafts Game Sync server'
 arch=('x86_64')
 url='https://github.com/CrashMediaIT/Gcmgamesync'
 license=('custom')
-depends=('ca-certificates' 'gcc-libs' 'glibc')
+depends=('ca-certificates' 'gcc-libs' 'glibc' 'xdg-utils')
+optdepends=('steam: launch ROMs imported via Steam ROM Manager'
+            'flatpak: install emulators that are only distributed as Flatpaks')
 makedepends=('cargo' 'git')
 source=("Gcmgamesync::git+https://github.com/CrashMediaIT/Gcmgamesync.git#tag=v${pkgver}"
         'crash-crafts-game-sync.desktop'
@@ -16,12 +18,16 @@ sha256sums=('SKIP'
 
 build() {
   cd Gcmgamesync
-  cargo build --release --locked
+  cargo build --release --locked --bins
 }
 
 package() {
   cd Gcmgamesync
   install -Dm0755 target/release/crash-crafts-game-sync "${pkgdir}/usr/bin/crash-crafts-game-sync"
+  install -Dm0755 target/release/crash-crafts-game-sync-gui "${pkgdir}/usr/bin/crash-crafts-game-sync-gui"
   install -Dm0644 "${srcdir}/crash-crafts-game-sync.desktop" "${pkgdir}/usr/share/applications/crash-crafts-game-sync.desktop"
   install -Dm0644 "${srcdir}/crash-crafts-game-sync.service" "${pkgdir}/usr/lib/systemd/user/crash-crafts-game-sync.service"
+  if [ -f "docs/screenshots/crash-crafts-game-sync.png" ]; then
+    install -Dm0644 docs/screenshots/crash-crafts-game-sync.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/crash-crafts-game-sync.png"
+  fi
 }
