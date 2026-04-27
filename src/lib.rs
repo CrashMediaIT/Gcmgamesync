@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -211,24 +212,89 @@ pub struct LatestRelease {
     pub source_url: String,
 }
 
+/// Return the effective release source for `emulator` on `os`. When the
+/// manifest declares a per-OS override under `release_source_overrides.{os}`
+/// it takes precedence (this is how Dolphin pulls Windows builds from the
+/// official dev website but Linux AppImages from the pkgforge mirror). When
+/// no override is present the top-level `release_source` is used.
+fn effective_release_source<'a>(emulator: &'a Value, os: &str) -> Option<&'a Value> {
+    if let Some(override_for_os) = emulator
+        .get("release_source_overrides")
+        .and_then(|v| v.get(os))
+        .filter(|v| v.is_object())
+    {
+        return Some(override_for_os);
+    }
+    emulator.get("release_source")
+}
+
 /// Discover the latest upstream release for an emulator.
 ///
-/// Supports two release sources:
+/// Supports three release sources:
 ///   * `github_release` — uses the public GitHub API (`/repos/{owner}/{repo}/releases/latest`,
 ///     falling back to `/releases?per_page=1` when only prereleases exist).
 ///   * `gitea_release` — used by Eden Nightly (`https://git.eden-emu.dev`).
 ///     Hits the same `/api/v1/repos/{owner}/{repo}/releases?limit=1` shape
 ///     that Gitea has used since 1.x.
+///   * `dolphin_dev_website` — scrapes `https://dolphin-emu.org/download/`
+///     to grab the bleeding-edge "Development Versions" Windows build.
+///     Dolphin does not publish dev builds via the GitHub release feed, so
+///     this is the only way to keep Windows clients on the dev channel.
 ///
 /// All emulators in `shared/emulators.json` are covered: DuckStation, PCSX2
 /// Nightly, RPCS3 Nightly (binaries-win), Xenia Canary, xemu, Cemu,
-/// RetroArch, Eden Nightly, and Dolphin Dev.
+/// RetroArch, Eden Nightly, and Dolphin Dev. The per-OS override map
+/// (`release_source_overrides`) lets a single emulator pick a different
+/// source for Windows vs. Linux — Dolphin uses this to stay on the dev
+/// channel for both platforms.
 pub fn latest_release(emulator: &Value) -> AppResult<LatestRelease> {
-    let source = emulator
-        .get("release_source")
-        .ok_or("emulator manifest is missing release_source")?;
-    let kind = source["type"].as_str().unwrap_or("");
     let os = current_os();
+    let source = effective_release_source(emulator, os)
+        .ok_or("emulator manifest is missing release_source")?;
+    latest_release_from_source(source, os)
+}
+
+/// In-memory TTL cache for `latest_release_from_source` results so a single
+/// GUI listing doesn't make one upstream request per emulator on every poll.
+/// Unauthenticated GitHub API is capped at 60 requests/hr per IP — without
+/// caching, a few page reloads exhaust the quota and every emulator's
+/// "latest version" silently becomes "unknown" (Eden was unaffected because
+/// it uses a separate Gitea host with its own quota). Successful results are
+/// cached for `RELEASE_CACHE_TTL_SECS`; failures aren't cached so transient
+/// errors get retried immediately.
+const RELEASE_CACHE_TTL_SECS: u64 = 600;
+
+fn release_cache() -> &'static Mutex<HashMap<String, (u64, LatestRelease)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (u64, LatestRelease)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn release_cache_key(source: &Value, os: &str) -> String {
+    // Stable, source-shape-aware cache key. Using the JSON form means any
+    // additional source parameters automatically participate in the key.
+    let kind = source["type"].as_str().unwrap_or("");
+    let canonical = serde_json::to_string(source).unwrap_or_default();
+    format!("{kind}|{os}|{canonical}")
+}
+
+fn latest_release_from_source(source: &Value, os: &str) -> AppResult<LatestRelease> {
+    let key = release_cache_key(source, os);
+    let now = unix_time();
+    if let Ok(cache) = release_cache().lock()
+        && let Some((fetched_at, cached)) = cache.get(&key)
+        && now.saturating_sub(*fetched_at) < RELEASE_CACHE_TTL_SECS
+    {
+        return Ok(cached.clone());
+    }
+    let release = fetch_latest_release_uncached(source, os)?;
+    if let Ok(mut cache) = release_cache().lock() {
+        cache.insert(key, (now, release.clone()));
+    }
+    Ok(release)
+}
+
+fn fetch_latest_release_uncached(source: &Value, os: &str) -> AppResult<LatestRelease> {
+    let kind = source["type"].as_str().unwrap_or("");
     match kind {
         "github_release" => {
             let repo = source["repo"]
@@ -285,68 +351,145 @@ pub fn latest_release(emulator: &Value) -> AppResult<LatestRelease> {
                 download_url: pick_asset(&release["assets"], os),
                 source_url: release["html_url"].as_str().unwrap_or(&url).to_owned(),
             })
+        }
+        "dolphin_dev_website" => fetch_dolphin_dev_release(os),
+        other => Err(format!("unsupported release source type: {other}").into()),
+    }
+}
+
+/// Re-fetch the upstream release assets array for a specific OS so callers
+/// can run `pick_asset` against an OS other than the host's. Used by the
+/// admin "apply update" endpoint to publish both the Windows and Linux
+/// bundles from a single button click. Honors `release_source_overrides`
+/// so emulators with different feeds per OS (e.g. Dolphin) work correctly.
+fn release_assets_for_os(emulator: &Value, os: &str) -> AppResult<Value> {
+    let source = effective_release_source(emulator, os)
+        .ok_or("emulator manifest is missing release_source")?;
+    let kind = source["type"].as_str().unwrap_or("");
+    match kind {
+        "github_release" => {
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("github_release.repo is required")?;
+            let prerelease = source["prerelease"].as_bool().unwrap_or(false);
+            let url = if prerelease {
+                format!("https://api.github.com/repos/{repo}/releases?per_page=1")
+            } else {
+                format!("https://api.github.com/repos/{repo}/releases/latest")
+            };
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/vnd.github+json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = if prerelease {
+                body.as_array()
+                    .and_then(|arr| arr.first().cloned())
+                    .ok_or("no GitHub releases returned")?
+            } else {
+                body
+            };
+            Ok(release["assets"].clone())
+        }
+        "gitea_release" => {
+            let base = source["base"]
+                .as_str()
+                .ok_or("gitea_release.base is required")?
+                .trim_end_matches('/');
+            let repo = source["repo"]
+                .as_str()
+                .ok_or("gitea_release.repo is required")?;
+            let url = format!("{base}/api/v1/repos/{repo}/releases?limit=1");
+            let mut response = ureq::get(&url)
+                .header("User-Agent", "crash-crafts-game-sync")
+                .header("Accept", "application/json")
+                .call()?
+                .into_body();
+            let body: Value = response.read_json()?;
+            let release = body
+                .as_array()
+                .and_then(|arr| arr.first().cloned())
+                .ok_or("no Gitea releases returned")?;
+            Ok(release["assets"].clone())
+        }
+        "dolphin_dev_website" => {
+            // Synthesize a single-asset list so `pick_asset` can match the
+            // Windows download by `.7z` substring just like a GitHub release.
+            let release = fetch_dolphin_dev_release(os)?;
+            let url = release.download_url.unwrap_or_default();
+            let name = url.rsplit('/').next().unwrap_or("dolphin-dev").to_owned();
+            Ok(json!([{ "name": name, "browser_download_url": url }]))
         }
         other => Err(format!("unsupported release source type: {other}").into()),
     }
 }
 
-/// Re-fetch the upstream release assets array so callers can run
-/// `pick_asset` against a different OS than the host's. Used by the
-/// admin "apply update" endpoint to publish both the Windows and Linux
-/// bundles from a single button click.
-fn release_assets(emulator: &Value) -> AppResult<Value> {
-    let source = emulator
-        .get("release_source")
-        .ok_or("emulator manifest is missing release_source")?;
-    let kind = source["type"].as_str().unwrap_or("");
-    match kind {
-        "github_release" => {
-            let repo = source["repo"]
-                .as_str()
-                .ok_or("github_release.repo is required")?;
-            let prerelease = source["prerelease"].as_bool().unwrap_or(false);
-            let url = if prerelease {
-                format!("https://api.github.com/repos/{repo}/releases?per_page=1")
-            } else {
-                format!("https://api.github.com/repos/{repo}/releases/latest")
-            };
-            let mut response = ureq::get(&url)
-                .header("User-Agent", "crash-crafts-game-sync")
-                .header("Accept", "application/vnd.github+json")
-                .call()?
-                .into_body();
-            let body: Value = response.read_json()?;
-            let release = if prerelease {
-                body.as_array()
-                    .and_then(|arr| arr.first().cloned())
-                    .ok_or("no GitHub releases returned")?
-            } else {
-                body
-            };
-            Ok(release["assets"].clone())
+/// Scrape `https://dolphin-emu.org/download/` for the latest
+/// "Development Versions" build. Dolphin does not publish a JSON feed for
+/// dev builds, so we parse the HTML for the first `dl.dolphin-emu.org`
+/// download link of the appropriate type and the dev version number that
+/// labels its row.
+fn fetch_dolphin_dev_release(os: &str) -> AppResult<LatestRelease> {
+    let page_url = "https://dolphin-emu.org/download/";
+    let mut response = ureq::get(page_url)
+        .header("User-Agent", "crash-crafts-game-sync")
+        .header("Accept", "text/html")
+        .call()?
+        .into_body();
+    let html = response.read_to_string()?;
+    let download_url = pick_dolphin_dev_url(&html, os);
+    let version = parse_dolphin_dev_version(&html).unwrap_or_default();
+    Ok(LatestRelease {
+        version,
+        published_at: String::new(),
+        download_url,
+        source_url: page_url.to_owned(),
+    })
+}
+
+/// Find the first `dl.dolphin-emu.org` build URL on the Dolphin downloads
+/// page that matches the requested OS. Windows uses `.7z`, Linux uses
+/// AppImages (Dolphin does not currently host Linux AppImages, so this
+/// returns `None` and callers fall back to the per-OS override).
+fn pick_dolphin_dev_url(html: &str, os: &str) -> Option<String> {
+    // Walk all https URLs that look like a build artifact on dl.dolphin-emu.org.
+    let needle = "https://dl.dolphin-emu.org/builds/";
+    let mut search = html;
+    while let Some(idx) = search.find(needle) {
+        let tail = &search[idx..];
+        let end = tail
+            .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '<' || c == '>')
+            .unwrap_or(tail.len());
+        let url = &tail[..end];
+        let lower = url.to_lowercase();
+        let matches = match os {
+            "windows" => lower.ends_with(".7z") && lower.contains("x64"),
+            "linux" => lower.ends_with(".appimage"),
+            "macos" => lower.ends_with(".dmg"),
+            _ => false,
+        };
+        if matches {
+            return Some(url.to_owned());
         }
-        "gitea_release" => {
-            let base = source["base"]
-                .as_str()
-                .ok_or("gitea_release.base is required")?
-                .trim_end_matches('/');
-            let repo = source["repo"]
-                .as_str()
-                .ok_or("gitea_release.repo is required")?;
-            let url = format!("{base}/api/v1/repos/{repo}/releases?limit=1");
-            let mut response = ureq::get(&url)
-                .header("User-Agent", "crash-crafts-game-sync")
-                .header("Accept", "application/json")
-                .call()?
-                .into_body();
-            let body: Value = response.read_json()?;
-            let release = body
-                .as_array()
-                .and_then(|arr| arr.first().cloned())
-                .ok_or("no Gitea releases returned")?;
-            Ok(release["assets"].clone())
-        }
-        other => Err(format!("unsupported release source type: {other}").into()),
+        search = &tail[end..];
+    }
+    None
+}
+
+/// Pull the dev build version (e.g. `2603`) out of the downloads page so
+/// the GUI can show it as `latest_version`.
+fn parse_dolphin_dev_version(html: &str) -> Option<String> {
+    // Dev rows label the build like `dolphin-master-2603-x64.7z` — extract the
+    // version segment between `dolphin-master-` and the next `-`.
+    let marker = "dolphin-master-";
+    let after = html.find(marker).map(|i| &html[i + marker.len()..])?;
+    let end = after.find(|c: char| c == '-' || c == '.' || c == '"' || c == '<')?;
+    let version = &after[..end];
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_owned())
     }
 }
 
@@ -795,6 +938,52 @@ pub fn emulator_download_spec(emulator: &Value, os: &str) -> Option<DownloadSpec
     })
 }
 
+/// True when an emulator either ships a static `downloads.<os>.url` in the
+/// manifest or has a `release_source` we can resolve at install time. This
+/// is what the GUI listing uses to enable/disable the "Install" button —
+/// keeping it cheap (no network) while still reporting installability for
+/// every emulator with a configured release feed (Windows + Linux + Docker).
+pub fn emulator_installable(emulator: &Value, os: &str) -> bool {
+    if emulator_download_spec(emulator, os).is_some() {
+        return true;
+    }
+    effective_release_source(emulator, os).is_some()
+}
+
+/// Resolve the actual download spec to use for an install, preferring the
+/// admin-curated static `downloads.<os>` entry and falling back to the live
+/// `release_source` feed when the static URL is empty. This is what makes
+/// every emulator with a known release feed installable without the admin
+/// having to paste URLs into the manifest.
+fn resolve_install_spec(emulator: &Value, os: &str) -> AppResult<DownloadSpec> {
+    if let Some(spec) = emulator_download_spec(emulator, os) {
+        return Ok(spec);
+    }
+    let archive_default = emulator["downloads"][os]["archive"]
+        .as_str()
+        .unwrap_or("zip")
+        .to_owned();
+    let release = latest_release_for_os(emulator, os)?;
+    let url = release.download_url.ok_or_else(|| {
+        format!(
+            "no portable download URL for {} on {os}; the upstream release feed had no matching asset",
+            emulator["id"].as_str().unwrap_or("emulator")
+        )
+    })?;
+    Ok(DownloadSpec {
+        url,
+        sha256: None,
+        archive: archive_default,
+        strip_components: 0,
+    })
+}
+
+fn latest_release_for_os(emulator: &Value, os: &str) -> AppResult<LatestRelease> {
+    let source = effective_release_source(emulator, os)
+        .ok_or("emulator manifest is missing release_source")?;
+    latest_release_from_source(source, os)
+}
+
 /// Download a portable emulator build (or any other file) over HTTPS, write it
 /// to `destination`, and verify the SHA-256 checksum when one was supplied.
 /// Returns the number of bytes written.
@@ -898,10 +1087,12 @@ pub fn install_emulator(config: &DesktopConfig, emulator_id: &str) -> AppResult<
         }
     }
 
-    // Fallback: upstream vendor URL from the manifest.
-    let spec = emulator_download_spec(&emulator, current_os()).ok_or_else(|| {
+    // Fallback: upstream vendor URL from the manifest, falling back to the
+    // live release feed (Windows + Linux + Docker all benefit so admins don't
+    // need to keep static URLs in sync with every dev/nightly release).
+    let spec = resolve_install_spec(&emulator, current_os()).map_err(|err| {
         format!(
-            "no portable download URL for {emulator_id} on {} and the server has no bundle for it",
+            "no portable download URL for {emulator_id} on {} and the server has no bundle for it: {err}",
             current_os()
         )
     })?;
@@ -1057,27 +1248,68 @@ fn fetch_live_manifest(config: &DesktopConfig) -> AppResult<Value> {
 }
 
 /// Install (download) the Steam ROM Manager portable build into the SRM
-/// directory using the manifest's `srm_download` entry. Returns the path on
-/// disk for the downloaded archive.
+/// directory. Resolution order:
+///
+///   1. Static `srm_download.{os}.url` from the manifest (lets an admin
+///      pin a specific portable build with an SHA-256).
+///   2. The `srm_download.release_source` feed (defaults to the
+///      `SteamGridDB/steam-rom-manager` GitHub releases). This is what
+///      keeps Windows + Linux clients on the latest published portable
+///      build without anyone editing the manifest.
+///
+/// Returns the path on disk for the downloaded archive.
 pub fn install_srm(config: &DesktopConfig) -> AppResult<PathBuf> {
     let manifest = manifest();
     let srm = manifest["srm_download"].as_object().ok_or(
         "manifest has no srm_download entry; configure shared/emulators.json with an srm_download URL",
     )?;
-    let url = srm
-        .get(current_os())
-        .and_then(|v| v["url"].as_str())
+    let os = current_os();
+    let static_entry = srm.get(os).cloned().unwrap_or(Value::Null);
+    let static_url = static_entry["url"]
+        .as_str()
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("no SRM portable download URL for {}", current_os()))?
-        .to_owned();
-    let sha = srm
-        .get(current_os())
-        .and_then(|v| v["sha256"].as_str())
         .map(str::to_owned);
+    let static_sha = static_entry["sha256"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let archive = static_entry["archive"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("zip")
+        .to_owned();
+
+    let (url, sha256) = if let Some(url) = static_url {
+        (url, static_sha)
+    } else {
+        // Synthesize an emulator-shaped value so we can reuse the standard
+        // release-source resolver (with per-OS overrides if any future
+        // platform needs them).
+        let mut shim = json!({});
+        if let Some(rs) = srm.get("release_source") {
+            shim["release_source"] = rs.clone();
+        }
+        if let Some(rso) = srm.get("release_source_overrides") {
+            shim["release_source_overrides"] = rso.clone();
+        }
+        if effective_release_source(&shim, os).is_none() {
+            return Err(format!("no SRM portable download URL for {os}").into());
+        }
+        let release = latest_release_for_os(&shim, os)?;
+        let url = release.download_url.ok_or_else(|| {
+            format!(
+                "no SRM portable download URL for {os}; upstream release feed had no matching asset"
+            )
+        })?;
+        (url, None)
+    };
+
     let spec = DownloadSpec {
         url,
-        sha256: sha,
-        archive: "zip".to_owned(),
+        sha256,
+        archive,
         strip_components: 0,
     };
     let dir = if config.srm.steam_directory.trim().is_empty() {
@@ -2302,8 +2534,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 let asset_url = if os == current_os() {
                     release.download_url.clone()
                 } else {
-                    // Re-poll to pick the asset for the other OS family.
-                    pick_asset(&release_assets(&emulator).unwrap_or_default(), os)
+                    // Re-poll the per-OS effective release source (Dolphin uses
+                    // a dev-website source for Windows and the pkgforge
+                    // AppImage feed for Linux, so each OS needs its own poll).
+                    pick_asset(&release_assets_for_os(&emulator, os).unwrap_or_default(), os)
                 };
                 let Some(url) = asset_url else {
                     errors.push(json!({
@@ -3549,7 +3783,7 @@ fn list_local_emulators(config: &DesktopConfig) -> Value {
         .map(|emulator| {
             let id = emulator["id"].as_str().unwrap_or("").to_owned();
             let installed_match = detected.iter().find(|d| d["id"].as_str() == Some(&id));
-            let installable = emulator_download_spec(&emulator, os).is_some();
+            let installable = emulator_installable(&emulator, os);
             // Auto-detect available updates from the upstream release feed.
             // Network failures are tolerated so the GUI still loads when
             // offline; the front-end shows "unknown" in that case.
@@ -4267,6 +4501,146 @@ mod tests {
         emulator["downloads"]["linux"]["url"] = json!("https://example.invalid/x.AppImage");
         let spec = emulator_download_spec(&emulator, "linux").unwrap();
         assert_eq!(spec.url, "https://example.invalid/x.AppImage");
+    }
+
+    #[test]
+    fn emulator_installable_uses_release_source_when_static_url_missing() {
+        // Empty static download URLs but a release_source — still installable
+        // because resolve_install_spec will fall back to the live feed.
+        let emulator = json!({
+            "downloads": {"windows": {"url": ""}, "linux": {"url": ""}},
+            "release_source": {"type": "github_release", "repo": "x/y"}
+        });
+        assert!(emulator_installable(&emulator, "windows"));
+        assert!(emulator_installable(&emulator, "linux"));
+        // No static URL and no release_source — not installable.
+        let bare = json!({"downloads": {"linux": {"url": ""}}});
+        assert!(!emulator_installable(&bare, "linux"));
+    }
+
+    #[test]
+    fn effective_release_source_prefers_per_os_override() {
+        let emulator = json!({
+            "release_source": {"type": "github_release", "repo": "default/repo"},
+            "release_source_overrides": {
+                "linux": {"type": "github_release", "repo": "linux/repo"}
+            }
+        });
+        assert_eq!(
+            effective_release_source(&emulator, "linux").unwrap()["repo"],
+            "linux/repo"
+        );
+        assert_eq!(
+            effective_release_source(&emulator, "windows").unwrap()["repo"],
+            "default/repo"
+        );
+    }
+
+    #[test]
+    fn dolphin_manifest_targets_dev_channel_for_both_oses() {
+        // The Dolphin entry must always pull the bleeding-edge dev channel:
+        // dolphin-emu.org dev builds for Windows and the pkgforge AppImage
+        // mirror for Linux.
+        let dolphin = emulator_by_id("dolphin-dev").expect("dolphin-dev in manifest");
+        let win_source = effective_release_source(&dolphin, "windows").unwrap();
+        assert_eq!(win_source["type"], "dolphin_dev_website");
+        let linux_source = effective_release_source(&dolphin, "linux").unwrap();
+        assert_eq!(linux_source["type"], "github_release");
+        assert_eq!(linux_source["repo"], "pkgforge-dev/Dolphin-emu-AppImage");
+    }
+
+    #[test]
+    fn srm_manifest_has_release_source() {
+        // The SRM portable install must have a release source so the desktop
+        // GUI's "Install SRM portable" button works without anyone hand-pasting
+        // a download URL into the manifest.
+        let manifest = manifest();
+        let srm = manifest["srm_download"]
+            .as_object()
+            .expect("srm_download present");
+        assert!(
+            srm.contains_key("release_source"),
+            "srm_download must declare a release_source"
+        );
+        assert_eq!(srm["release_source"]["type"], "github_release");
+        assert_eq!(
+            srm["release_source"]["repo"], "SteamGridDB/steam-rom-manager",
+            "SRM should track SteamGridDB/steam-rom-manager"
+        );
+    }
+
+    #[test]
+    fn pick_dolphin_dev_url_extracts_first_matching_artifact() {
+        let html = r#"
+            <table>
+              <tr>
+                <td>Dev 2603</td>
+                <td><a href="https://dl.dolphin-emu.org/builds/aa/bb/dolphin-master-2603-x64.7z">Win x64</a></td>
+                <td><a href="https://dl.dolphin-emu.org/builds/aa/bb/dolphin-master-2603-macos-arm64.dmg">Mac</a></td>
+              </tr>
+            </table>
+        "#;
+        assert_eq!(
+            pick_dolphin_dev_url(html, "windows").as_deref(),
+            Some("https://dl.dolphin-emu.org/builds/aa/bb/dolphin-master-2603-x64.7z")
+        );
+        assert_eq!(
+            pick_dolphin_dev_url(html, "macos").as_deref(),
+            Some("https://dl.dolphin-emu.org/builds/aa/bb/dolphin-master-2603-macos-arm64.dmg")
+        );
+        // Dolphin doesn't host Linux AppImages on dl.dolphin-emu.org — return
+        // None so the manifest's Linux release_source_override (pkgforge) is
+        // used instead.
+        assert!(pick_dolphin_dev_url(html, "linux").is_none());
+    }
+
+    #[test]
+    fn parse_dolphin_dev_version_pulls_master_build_number() {
+        let html = r#"<a href=".../dolphin-master-2603-x64.7z">build</a>"#;
+        assert_eq!(parse_dolphin_dev_version(html).as_deref(), Some("2603"));
+        assert!(parse_dolphin_dev_version("nothing here").is_none());
+    }
+
+    #[test]
+    fn release_cache_returns_cached_value_within_ttl() {
+        // Seed the cache with a known release and confirm a follow-up lookup
+        // for the same source is served from cache (no network). This is
+        // what prevents 9 emulator listings from burning the unauthenticated
+        // GitHub rate limit and silently returning "unknown" for everyone.
+        let source = json!({
+            "type": "github_release",
+            "repo": "release-cache-test/repo",
+            "prerelease": false,
+            "_test_unique": unix_time().to_string()
+        });
+        let key = release_cache_key(&source, "linux");
+        let seeded = LatestRelease {
+            version: "v1.2.3".to_owned(),
+            published_at: "2026-01-01T00:00:00Z".to_owned(),
+            download_url: Some("https://example.invalid/x.AppImage".to_owned()),
+            source_url: "https://example.invalid/release".to_owned(),
+        };
+        {
+            let mut cache = release_cache().lock().unwrap();
+            cache.insert(key.clone(), (unix_time(), seeded.clone()));
+        }
+        let got = latest_release_from_source(&source, "linux").unwrap();
+        assert_eq!(got, seeded);
+
+        // Stale entries must be discarded so the next call refetches; here we
+        // just verify that an old timestamp would no longer satisfy the TTL.
+        {
+            let mut cache = release_cache().lock().unwrap();
+            cache.insert(
+                key.clone(),
+                (
+                    unix_time().saturating_sub(RELEASE_CACHE_TTL_SECS + 1),
+                    seeded.clone(),
+                ),
+            );
+            let entry = cache.get(&key).cloned().unwrap();
+            assert!(unix_time().saturating_sub(entry.0) >= RELEASE_CACHE_TTL_SECS);
+        }
     }
 
     #[test]
