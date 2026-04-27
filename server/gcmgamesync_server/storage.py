@@ -50,8 +50,8 @@ def write_versioned_file(root: Path, owner: str, rel_path: str, content: bytes) 
         version_name = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         shutil.copy2(base, versions / version_name)
         existing = sorted(versions.iterdir(), key=lambda p: p.name)
-        historical_versions_to_retain = max(VERSIONS_TO_KEEP - 1, 0)
-        delete_count = max(len(existing) - historical_versions_to_retain, 0)
+        max_old_versions = max(VERSIONS_TO_KEEP - 1, 0)
+        delete_count = max(len(existing) - max_old_versions, 0)
         for old in existing[:delete_count]:
             old.unlink()
     if changed:

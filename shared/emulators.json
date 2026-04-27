@@ -89,7 +89,7 @@
       "name": "Eden Nightly",
       "channels": ["nightly"],
       "homepage": "https://git.eden-emu.dev/eden-ci/nightly/releases",
-      "portable_markers": ["user"],
+      "portable_markers": ["user/config"],
       "detect_paths": ["Eden", "eden"],
       "sync_include": ["user/nand/user/save/**", "user/sdmc/Nintendo/**"],
       "sync_exclude": ["user/config/**", "user/log/**", "user/cache/**"],
