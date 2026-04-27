@@ -1491,9 +1491,16 @@ fn print_usage() {
     );
 }
 
+fn command_name(args: &[String]) -> &str {
+    args.get(1)
+        .filter(|arg| !arg.starts_with("--"))
+        .map(String::as_str)
+        .unwrap_or("companion")
+}
+
 fn main() -> AppResult<()> {
     let args: Vec<String> = env::args().collect();
-    match args.get(1).map(String::as_str).unwrap_or("companion") {
+    match command_name(&args) {
         "companion" => cmd_companion(&args),
         "server" => run_server(&args),
         "manifest" => {
@@ -1722,6 +1729,26 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Docker server URL")
+        );
+    }
+
+    #[test]
+    fn no_command_or_config_only_defaults_to_companion() {
+        assert_eq!(
+            command_name(&["crash-crafts-game-sync".to_owned()]),
+            "companion"
+        );
+        assert_eq!(
+            command_name(&[
+                "crash-crafts-game-sync".to_owned(),
+                "--config".to_owned(),
+                "desktop-config.json".to_owned()
+            ]),
+            "companion"
+        );
+        assert_eq!(
+            command_name(&["crash-crafts-game-sync".to_owned(), "server".to_owned()]),
+            "server"
         );
     }
 
