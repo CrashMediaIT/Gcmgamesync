@@ -1,0 +1,14 @@
+services:
+  gcmgamesync:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      GCM_DATA_DIR: /data
+      GCM_HOST: 0.0.0.0
+      GCM_ADMIN_EMAIL: ${GCM_ADMIN_EMAIL:?set GCM_ADMIN_EMAIL}
+      GCM_ADMIN_PASSWORD: ${GCM_ADMIN_PASSWORD:?set GCM_ADMIN_PASSWORD}
+    volumes:
+      - gcmgamesync-data:/data
+volumes:
+  gcmgamesync-data:
