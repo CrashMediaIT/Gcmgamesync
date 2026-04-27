@@ -9,7 +9,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSIONS_TO_KEEP = 5
+ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = json.loads((ROOT / "shared" / "emulators.json").read_text(encoding="utf-8"))
+VERSIONS_TO_KEEP = int(MANIFEST["policy"]["file_versions_to_keep"])
 
 
 class JsonStore:

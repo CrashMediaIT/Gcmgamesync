@@ -13,8 +13,8 @@ from gcmgamesync_server.storage import write_versioned_file
 class GcmSmokeTests(unittest.TestCase):
     def test_manifest_contains_requested_emulators_and_dolphin_dev(self):
         ids = {item["id"] for item in MANIFEST["emulators"]}
-        self.assertIn("dolphin-dev", ids)
-        self.assertTrue({"duckstation", "pcsx2-nightly", "rpcs3-nightly", "xenia-canary", "xemu", "cemu", "retroarch", "eden-nightly"}.issubset(ids))
+        required = {"duckstation", "pcsx2-nightly", "rpcs3-nightly", "xenia-canary", "xemu", "cemu", "retroarch", "eden-nightly", "dolphin-dev"}
+        self.assertTrue(required.issubset(ids))
 
     def test_config_exclusion_prevents_device_local_config_sync(self):
         dolphin = next(item for item in MANIFEST["emulators"] if item["id"] == "dolphin-dev")

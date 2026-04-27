@@ -2,6 +2,7 @@
   "schema_version": 1,
   "policy": {
     "file_versions_to_keep": 5,
+    "file_versions_to_keep_description": "Total copies retained per file, including the current copy.",
     "sync_only_changed_files": true,
     "device_local_configuration": true,
     "portable_mode_required": true
