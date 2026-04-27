@@ -1,5 +1,5 @@
 services:
-  gcmgamesync:
+  crash-crafts-game-sync:
     build: .
     ports:
       - "8080:8080"
@@ -10,6 +10,6 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - gcmgamesync-data:/data
+      - crash-crafts-game-sync-data:/data
 volumes:
-  gcmgamesync-data:
+  crash-crafts-game-sync-data:

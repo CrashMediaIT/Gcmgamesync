@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
-  <title id="title">Gcmgamesync web UI screenshot</title>
-  <desc id="desc">Dark neon web dashboard for the Rust Gcmgamesync server.</desc>
+  <title id="title">Crash Crafts Game Sync web UI screenshot</title>
+  <desc id="desc">Dark neon web dashboard for the Rust Crash Crafts Game Sync server.</desc>
   <defs>
     <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
       <stop stop-color="#070a12"/>
@@ -21,7 +21,7 @@
   <circle cx="1010" cy="80" r="250" fill="#22d3ee" opacity=".18"/>
   <rect x="80" y="58" width="1040" height="70" rx="24" fill="#111827" opacity=".82" stroke="#ffffff" stroke-opacity=".14"/>
   <rect x="108" y="75" width="38" height="38" rx="12" fill="url(#accent)" filter="url(#glow)"/>
-  <text x="162" y="101" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800">Gcmgamesync</text>
+  <text x="162" y="101" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="800">Crash Crafts Game Sync</text>
   <rect x="812" y="77" width="278" height="32" rx="16" fill="none" stroke="#ffffff" stroke-opacity=".16"/>
   <text x="834" y="99" fill="#aab7cf" font-family="Inter, Arial, sans-serif" font-size="16">Rust server + client scaffold</text>
   <rect x="80" y="160" width="650" height="360" rx="28" fill="#111827" opacity=".84" stroke="#ffffff" stroke-opacity=".14"/>
