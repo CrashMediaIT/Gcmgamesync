@@ -18,4 +18,5 @@ COPY shared ./shared
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["crash-crafts-game-sync", "healthcheck"]
 CMD ["crash-crafts-game-sync", "server", "--host", "0.0.0.0", "--port", "8080", "--data-dir", "/data"]

@@ -24,6 +24,8 @@ docker compose up --build
 
 Open <http://localhost:8080> and complete the first-run setup page. The initial admin account, TOTP secret, Office365 OAuth SMTP metadata, and uploaded logo are stored in the Docker volume at `/data`; no Docker environment variables are required.
 
+The image includes a built-in healthcheck that calls `/api/health`, and the Docker build context excludes local build outputs and repository metadata.
+
 For transit security, run the container behind an HTTPS reverse proxy before exposing it beyond localhost. At-rest state and uploaded synchronized files are written with restrictive file permissions on Unix-like hosts. A separate Postgres service is not required for the current Docker setup because the app stores its small setup/configuration state and versioned file metadata in the mounted `/data` volume.
 
 ## Web UI theme

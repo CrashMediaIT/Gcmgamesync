@@ -997,6 +997,21 @@ fn cmd_upload_log(args: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+fn cmd_healthcheck(args: &[String]) -> AppResult<()> {
+    let url = args
+        .windows(2)
+        .find(|window| window[0] == "--url")
+        .map(|window| window[1].clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8080/api/health".to_owned());
+    let mut response = ureq::get(validate_server_url(&url)?).call()?.into_body();
+    let result: Value = response.read_json()?;
+    if result["status"] == "ok" {
+        Ok(())
+    } else {
+        Err("healthcheck endpoint did not report ok".into())
+    }
+}
+
 fn print_usage() {
     eprintln!(
         "usage:
@@ -1004,7 +1019,8 @@ fn print_usage() {
    crash-crafts-game-sync manifest
    crash-crafts-game-sync scan --root <path>
    crash-crafts-game-sync status --root <path>
-   crash-crafts-game-sync upload-log --server <url> --token <token> [--level info] <message>"
+   crash-crafts-game-sync upload-log --server <url> --token <token> [--level info] <message>
+   crash-crafts-game-sync healthcheck [--url http://127.0.0.1:8080/api/health]"
     );
 }
 
@@ -1047,6 +1063,7 @@ fn main() -> AppResult<()> {
             }
         }
         "upload-log" => cmd_upload_log(&args),
+        "healthcheck" => cmd_healthcheck(&args),
         _ => {
             print_usage();
             std::process::exit(2);
