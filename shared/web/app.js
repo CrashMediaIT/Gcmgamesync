@@ -243,28 +243,60 @@
         event.preventDefault();
         const path = link.getAttribute("data-versions");
         const owner = link.getAttribute("data-owner");
-        const result = await api("/api/files/" + path + "/versions?owner=" + encodeURIComponent(owner));
-        const target = $("#file-versions");
-        if (!result.ok) {
-          target.innerHTML = "<p class=\"muted\">" + escapeHtml(result.body.error || "Failed.") + "</p>";
+        await renderVersions(path, owner);
+      });
+    });
+  }
+
+  async function renderVersions(path, owner) {
+    const result = await api("/api/files/" + path + "/versions?owner=" + encodeURIComponent(owner));
+    const target = $("#file-versions");
+    if (!target) return;
+    if (!result.ok) {
+      target.innerHTML = "<p class=\"muted\">" + escapeHtml(result.body.error || "Failed.") + "</p>";
+      return;
+    }
+    const versions = (result.body.versions || []).slice().reverse();
+    target.innerHTML =
+      "<h3>Versions for " +
+      escapeHtml(decodeURIComponent(path)) +
+      "</h3>" +
+      "<p class=\"muted\">Restoring an older version snapshots the current file as a new version first, so newer versions are preserved and the revert can itself be undone.</p>" +
+      "<div id=\"file-versions-msg\" class=\"muted\"></div>" +
+      "<ul class=\"log-list\">" +
+      versions
+        .map(
+          (v) =>
+            "<li>" +
+            escapeHtml(v.name) +
+            " — " +
+            escapeHtml(bytes(v.size)) +
+            " <button type=\"button\" class=\"btn-secondary\" data-restore=\"" +
+            escapeHtml(encodeURIComponent(v.name)) +
+            "\">Restore</button>" +
+            "</li>"
+        )
+        .join("") +
+      "</ul>";
+    $$('#file-versions button[data-restore]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const versionName = decodeURIComponent(btn.getAttribute("data-restore"));
+        if (!confirm("Restore version " + versionName + "? The current file will be saved as a new version first.")) {
           return;
         }
-        const versions = result.body.versions || [];
-        target.innerHTML =
-          "<h3>Versions for " +
-          escapeHtml(decodeURIComponent(path)) +
-          "</h3><ul class=\"log-list\">" +
-          versions
-            .map(
-              (v) =>
-                "<li>" +
-                escapeHtml(v.name) +
-                " — " +
-                escapeHtml(bytes(v.size)) +
-                "</li>"
-            )
-            .join("") +
-          "</ul>";
+        btn.disabled = true;
+        const restore = await api(
+          "/api/files/" + path + "/versions/" + encodeURIComponent(versionName) + "/restore?owner=" + encodeURIComponent(owner),
+          { method: "POST" }
+        );
+        const msg = $("#file-versions-msg");
+        if (!restore.ok) {
+          if (msg) msg.textContent = "Restore failed: " + (restore.body.error || "unknown error");
+          btn.disabled = false;
+          return;
+        }
+        if (msg) msg.textContent = "Restored. Devices will receive the reverted file on their next sync.";
+        await renderVersions(path, owner);
       });
     });
   }

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Crash Crafts Game Sync desktop GUI</title>
+  <desc id="desc">OneDrive-style desktop GUI for Windows, Linux, and Steam Deck. Tabs: Status, Emulators, SRM, Folders, Activity, Settings. Connects to the Docker server over HTTPS (port 443) with the URL entered during the first-run wizard.</desc>
+  <defs>
+    <linearGradient id="bg3" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b0f1a"/>
+      <stop offset="1" stop-color="#101727"/>
+    </linearGradient>
+    <linearGradient id="accent3" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#ff7a18"/>
+      <stop offset="1" stop-color="#23d5ab"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="720" fill="url(#bg3)"/>
+  <!-- Window chrome -->
+  <rect x="40" y="40" width="1120" height="640" rx="12" fill="#0d1424" stroke="#1f2c47"/>
+  <circle cx="68" cy="68" r="6" fill="#ff5f57"/>
+  <circle cx="88" cy="68" r="6" fill="#febc2e"/>
+  <circle cx="108" cy="68" r="6" fill="#28c840"/>
+  <text x="600" y="72" fill="#7d8aa6" font-family="Inter,Arial" font-size="12" text-anchor="middle">Crash Crafts Game Sync — desktop</text>
+  <!-- Header -->
+  <g font-family="Inter,Arial">
+    <text x="72" y="120" fill="#ffffff" font-size="20" font-weight="700">player@example.com</text>
+    <text x="72" y="142" fill="#7d8aa6" font-size="12">https://sync.example.com  ·  port 443  ·  device: deck-living-room</text>
+    <circle cx="1124" cy="120" r="7" fill="#23d5ab"/>
+    <text x="1110" y="124" fill="#23d5ab" font-size="12" text-anchor="end">Connected</text>
+  </g>
+  <!-- Tabs -->
+  <g font-family="Inter,Arial" font-size="13">
+    <rect x="72" y="164" width="92" height="32" rx="6" fill="#172238"/>
+    <text x="118" y="184" fill="#ffffff" text-anchor="middle">Status</text>
+    <text x="200" y="184" fill="#7d8aa6" text-anchor="middle">Emulators</text>
+    <text x="282" y="184" fill="#7d8aa6" text-anchor="middle">SRM</text>
+    <text x="354" y="184" fill="#7d8aa6" text-anchor="middle">Folders</text>
+    <text x="430" y="184" fill="#7d8aa6" text-anchor="middle">Activity</text>
+    <text x="510" y="184" fill="#7d8aa6" text-anchor="middle">Settings</text>
+  </g>
+  <line x1="72" y1="208" x2="1128" y2="208" stroke="#1f2c47"/>
+  <!-- Sync status -->
+  <g font-family="Inter,Arial">
+    <rect x="72" y="232" width="500" height="180" rx="10" fill="#0f1828" stroke="#1f2c47"/>
+    <text x="92" y="262" fill="#7d8aa6" font-size="12">SYNC STATE</text>
+    <text x="92" y="304" fill="url(#accent3)" font-size="32" font-weight="700">Idle</text>
+    <text x="92" y="336" fill="#dde6f7" font-size="13">Last sync 2 minutes ago · 6 files pushed · 0 errors</text>
+    <text x="92" y="358" fill="#dde6f7" font-size="13">Next scheduled sync in 4 minutes</text>
+    <rect x="92" y="372" width="100" height="28" rx="6" fill="#ff7a18"/>
+    <text x="142" y="391" fill="#0b0f1a" text-anchor="middle" font-size="13" font-weight="600">Sync now</text>
+    <rect x="200" y="372" width="100" height="28" rx="6" fill="#172238" stroke="#ff7a18"/>
+    <text x="250" y="391" fill="#ff7a18" text-anchor="middle" font-size="13" font-weight="600">Pause</text>
+  </g>
+  <!-- Emulator install summary -->
+  <g font-family="Inter,Arial">
+    <rect x="592" y="232" width="536" height="180" rx="10" fill="#0f1828" stroke="#1f2c47"/>
+    <text x="612" y="262" fill="#7d8aa6" font-size="12">EMULATOR INSTALL STATUS</text>
+    <g fill="#dde6f7" font-size="13">
+      <text x="612" y="292">DuckStation</text><text x="800" y="292">Installed · portable · v0.1-7128</text><circle cx="1100" cy="288" r="5" fill="#23d5ab"/>
+      <text x="612" y="316">PCSX2 nightly</text><text x="800" y="316">Installed · portable · v2.5.3</text><circle cx="1100" cy="312" r="5" fill="#23d5ab"/>
+      <text x="612" y="340">RPCS3 nightly</text><text x="800" y="340">Installed · portable (config preserved)</text><circle cx="1100" cy="336" r="5" fill="#23d5ab"/>
+      <text x="612" y="364">Cemu 2.6</text><text x="800" y="364">Update available 2.6 → 2.7</text><circle cx="1100" cy="360" r="5" fill="#ff7a18"/>
+      <text x="612" y="388">Dolphin dev</text><text x="800" y="388">Not installed</text><circle cx="1100" cy="384" r="5" fill="#7d8aa6"/>
+    </g>
+  </g>
+  <!-- Activity -->
+  <g font-family="Inter,Arial">
+    <rect x="72" y="432" width="1056" height="220" rx="10" fill="#0f1828" stroke="#1f2c47"/>
+    <text x="92" y="462" fill="#7d8aa6" font-size="12">RECENT ACTIVITY</text>
+    <g fill="#dde6f7" font-size="13">
+      <text x="92" y="490">02:24:11  push  duckstation/memcards/card1.mcd  (rev 5, 128 KiB)</text>
+      <text x="92" y="514">02:24:09  push  pcsx2/memcards/Mcd001.ps2  (rev 4, 8 MiB)</text>
+      <text x="92" y="538">02:23:55  pull  rpcs3/dev_hdd0/home/00000001/savedata  (rev 2, 2.4 MiB)</text>
+      <text x="92" y="562">02:23:55  skip  rpcs3/config.yml  (device-local, never synced)</text>
+      <text x="92" y="586">02:18:02  apply admin update: Cemu 2.7 portable (skipped settings.xml)</text>
+      <text x="92" y="610">02:10:00  heartbeat ok  emulator_root=/home/deck/Emu  rom_root=/home/deck/Roms</text>
+      <text x="92" y="634">02:00:00  installed RetroArch 1.20 portable</text>
+    </g>
+  </g>
+</svg>

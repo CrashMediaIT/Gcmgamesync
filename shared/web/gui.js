@@ -39,8 +39,14 @@
 
   async function api(path, options) {
     const opts = Object.assign({}, options || {});
+    const meta = document.querySelector('meta[name="ccgs-local-token"]');
+    const token = meta ? meta.getAttribute("content") : "";
+    opts.headers = Object.assign({}, opts.headers || {});
+    if (token) {
+      opts.headers["Authorization"] = "Bearer " + token;
+    }
     if (opts.body && typeof opts.body !== "string") {
-      opts.headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+      opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(opts.body);
     }
     const response = await fetch(path, opts);
