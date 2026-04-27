@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0
+        required: true
+        type: string
+      draft:
+        description: Create the release as a draft
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark the release as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/crashmediait/gcmgamesync
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  applications:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact: crash-crafts-game-sync-linux-x86_64
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: crash-crafts-game-sync-windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/linux-packaging
+          cp target/release/crash-crafts-game-sync dist/
+          cp packaging/linux/* dist/linux-packaging/
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\windows-packaging -Force | Out-Null
+          Copy-Item target\release\crash-crafts-game-sync.exe dist\
+          Copy-Item packaging\windows\Product.wxs dist\windows-packaging\
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  docker:
+    name: Build and publish Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.RELEASE_TAG }}
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - applications
+      - docker
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRAFT_FLAG: ${{ inputs.draft && '--draft' || '' }}
+          PRERELEASE_FLAG: ${{ inputs.prerelease && '--prerelease' || '' }}
+        run: |
+          gh release create "${RELEASE_TAG}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${RELEASE_TAG}" \
+            --notes "Automated release for ${RELEASE_TAG}." \
+            ${DRAFT_FLAG} \
+            ${PRERELEASE_FLAG}
