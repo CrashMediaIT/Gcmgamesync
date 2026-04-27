@@ -6,6 +6,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .scanner import MANIFEST, detect_emulators
 
@@ -17,6 +18,15 @@ def post_json(url: str, payload: dict, token: str | None = None) -> dict:
         request.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - user-configured server URL
         return json.loads(response.read().decode("utf-8"))
+
+
+def validate_server_url(server: str) -> str:
+    parsed = urlparse(server)
+    if parsed.scheme == "https":
+        return server
+    if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+        return server
+    raise ValueError("server URL must use HTTPS unless it targets localhost")
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -38,7 +48,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_log(args: argparse.Namespace) -> int:
     try:
-        result = post_json(f"{args.server.rstrip('/')}/api/logs", {"level": args.level, "message": args.message, "context": {"client": "gcmgamesync-cli"}}, args.token)
+        server = validate_server_url(args.server)
+        result = post_json(f"{server.rstrip('/')}/api/logs", {"level": args.level, "message": args.message, "context": {"client": "gcmgamesync-cli"}}, args.token)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except urllib.error.URLError as exc:
         print(f"failed to upload log: {exc}", file=sys.stderr)
         return 1

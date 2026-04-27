@@ -6,13 +6,106 @@ import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import unquote, urlparse
 
 from .auth import hash_password, new_token, new_totp_secret, otpauth_uri, verify_password, verify_totp
 from .storage import JsonStore, write_versioned_file
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = json.loads((ROOT / "shared" / "emulators.json").read_text(encoding="utf-8"))
+
+UI_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gcmgamesync</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a12;
+      --panel: rgba(17, 24, 39, 0.82);
+      --panel-strong: rgba(12, 18, 31, 0.94);
+      --text: #f8fafc;
+      --muted: #aab7cf;
+      --brand: #ff7a1a;
+      --brand-2: #22d3ee;
+      --good: #7ee787;
+      --warn: #fbbf24;
+      --border: rgba(255, 255, 255, 0.12);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(255, 122, 26, 0.23), transparent 32rem),
+        radial-gradient(circle at 82% 4%, rgba(34, 211, 238, 0.20), transparent 30rem),
+        linear-gradient(135deg, #070a12 0%, #101827 48%, #070a12 100%);
+    }
+    .shell { width: min(1160px, calc(100% - 32px)); margin: 0 auto; padding: 32px 0 56px; }
+    nav, .card, .stat, .feature {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(18px);
+      border-radius: 24px;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; }
+    .logo { display: flex; gap: 12px; align-items: center; font-weight: 800; letter-spacing: -0.04em; }
+    .mark { width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: 0 0 32px rgba(255, 122, 26, 0.45); }
+    .pill { color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; font-size: 0.85rem; }
+    .hero { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 24px; align-items: stretch; margin-top: 28px; }
+    .card { padding: clamp(28px, 5vw, 56px); }
+    h1 { font-size: clamp(2.4rem, 7vw, 5.7rem); line-height: 0.94; margin: 0 0 20px; letter-spacing: -0.08em; }
+    h2 { margin: 0 0 12px; font-size: 1.25rem; }
+    p { color: var(--muted); line-height: 1.7; }
+    .accent { background: linear-gradient(90deg, var(--brand), var(--brand-2)); -webkit-background-clip: text; color: transparent; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+    a.button { text-decoration: none; color: #071019; background: linear-gradient(135deg, var(--brand), #ffd166); padding: 13px 18px; border-radius: 14px; font-weight: 800; }
+    a.secondary { color: var(--text); background: rgba(255,255,255,0.08); border: 1px solid var(--border); }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; height: 100%; }
+    .stat { padding: 22px; }
+    .value { display: block; font-size: 2rem; font-weight: 900; color: var(--good); }
+    .label { color: var(--muted); font-size: 0.95rem; }
+    .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px; }
+    .feature { padding: 22px; background: var(--panel-strong); }
+    code { color: var(--brand-2); }
+    @media (max-width: 820px) { .hero, .features { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <nav>
+      <div class="logo"><span class="mark"></span><span>Gcmgamesync</span></div>
+      <span class="pill">CrashCrafts-inspired dark neon theme</span>
+    </nav>
+    <section class="hero">
+      <div class="card">
+        <h1>Save sync for <span class="accent">every emulator rig.</span></h1>
+        <p>Docker-hosted backup, five-copy version retention, TOTP-protected accounts, client logs, and device-local emulator configuration protection for Windows, Linux, and Steam Deck workflows.</p>
+        <div class="actions">
+          <a class="button" href="/api/emulators">View emulator manifest</a>
+          <a class="button secondary" href="/api/health">Check server health</a>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="stat"><span class="value">9</span><span class="label">emulator profiles including Dolphin dev</span></div>
+        <div class="stat"><span class="value">5</span><span class="label">total copies retained per changed file</span></div>
+        <div class="stat"><span class="value">2FA</span><span class="label">required registration/login model</span></div>
+        <div class="stat"><span class="value">OS</span><span class="label">aware update metadata</span></div>
+      </div>
+    </section>
+    <section class="features">
+      <div class="feature"><h2>Portable-first</h2><p>Client detection checks portable markers before sync so each emulator can keep saves isolated and predictable.</p></div>
+      <div class="feature"><h2>Config-safe</h2><p>Manifest exclusions keep controllers, paths, graphics, and other user configuration local to each device.</p></div>
+      <div class="feature"><h2>Admin-ready</h2><p>Admin APIs bootstrap invites, users, logs, and future server-managed emulator updates.</p></div>
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 def bootstrap_store(data_dir: Path) -> JsonStore:
@@ -87,8 +180,7 @@ class GcmHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            html = """<!doctype html><title>Gcmgamesync</title><h1>Gcmgamesync</h1><p>Docker-hosted emulator save sync MVP.</p><ul><li><a href='/api/emulators'>Emulator manifest</a></li><li><a href='/api/health'>Health</a></li></ul>""".encode()
-            self._send(HTTPStatus.OK, html, "text/html; charset=utf-8")
+            self._send(HTTPStatus.OK, UI_HTML.encode(), "text/html; charset=utf-8")
         elif parsed.path == "/api/health":
             self._send(HTTPStatus.OK, {"ok": True})
         elif parsed.path == "/api/emulators":
@@ -164,7 +256,7 @@ class GcmHandler(BaseHTTPRequestHandler):
         user = self._require_user()
         if not user:
             return
-        rel_path = parsed.path.removeprefix("/api/files/")
+        rel_path = unquote(parsed.path.removeprefix("/api/files/"))
         length = int(self.headers.get("Content-Length", "0"))
         result = write_versioned_file(self.data_dir, user["email"], rel_path, self.rfile.read(length))
         self._send(HTTPStatus.OK, result)
@@ -172,7 +264,7 @@ class GcmHandler(BaseHTTPRequestHandler):
 
 def run() -> None:
     data_dir = Path(os.environ.get("GCM_DATA_DIR", "/data"))
-    host = os.environ.get("GCM_HOST", "0.0.0.0")
+    host = os.environ.get("GCM_HOST", "127.0.0.1")
     port = int(os.environ.get("GCM_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), GcmHandler)
     server.data_dir = data_dir  # type: ignore[attr-defined]

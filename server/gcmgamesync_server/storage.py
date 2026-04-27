@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import time
@@ -46,10 +47,11 @@ def write_versioned_file(root: Path, owner: str, rel_path: str, content: bytes) 
 
     changed = not base.exists() or base.read_bytes() != content
     if changed and base.exists():
-        version_name = str(int(time.time() * 1000))
+        version_name = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         shutil.copy2(base, versions / version_name)
         existing = sorted(versions.iterdir(), key=lambda p: p.name)
-        for old in existing[:-VERSIONS_TO_KEEP]:
+        historical_to_keep = max(VERSIONS_TO_KEEP - 1, 0)
+        for old in existing[:-historical_to_keep] if historical_to_keep else existing:
             old.unlink()
     if changed:
         base.write_bytes(content)

@@ -2,7 +2,7 @@
 
 ## Server
 
-The server is a Docker-friendly Python HTTP service. It stores users, sessions, invites, and recent logs in a JSON state file and stores synchronized files under `/data/files/{user}`. When a changed file is replaced, the previous copy is moved to `/data/versions/{user}` and pruned to five versions.
+The server is a Docker-friendly Python HTTP service. It stores users, sessions, invites, and recent logs in a JSON state file and stores synchronized files under `/data/files/{user}`. When a changed file is replaced, the previous copy is moved to `/data/versions/{user}` and pruned so each file has at most five total copies including the current copy.
 
 ## Client
 

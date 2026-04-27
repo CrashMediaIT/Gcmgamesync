@@ -5,7 +5,7 @@ Gcmgamesync is an emulator save backup and synchronization platform. The initial
 ## Goals
 
 - Synchronize emulator saves across devices.
-- Preserve five historical versions of changed files only.
+- Preserve five total copies of changed files, including the current copy.
 - Keep gamepad, path, graphics, and other user/device configuration local to each device.
 - Support admin-managed users, registration, required TOTP 2FA, server-side client logs, and emulator update metadata.
 - Track DuckStation, PCSX2 nightly, RPCS3 nightly, Xenia Canary, xemu, Cemu, RetroArch, Eden nightly, and Dolphin dev builds.
@@ -13,10 +13,14 @@ Gcmgamesync is an emulator save backup and synchronization platform. The initial
 ## Run the server with Docker
 
 ```bash
-docker compose up --build
+GCM_ADMIN_EMAIL=admin@example.com GCM_ADMIN_PASSWORD='replace-with-a-long-random-password' docker compose up --build
 ```
 
-The server listens on <http://localhost:8080>. Set `GCM_ADMIN_EMAIL` and `GCM_ADMIN_PASSWORD` before production use. On first boot, the server stores an admin TOTP provisioning URI in `/data/state.json` under `bootstrap_admin_otpauth`.
+The server listens on <http://localhost:8080>. Set `GCM_ADMIN_EMAIL` and `GCM_ADMIN_PASSWORD`; the compose file refuses to start without them. On first boot, the server stores an admin TOTP provisioning URI in `/data/state.json` under `bootstrap_admin_otpauth`.
+
+## Web UI theme
+
+The server root (`/`) includes a modern dark, glass-style UI with orange and cyan neon accents. I could not fetch `crashcrafts.com` from this sandbox to verify exact brand tokens, so the MVP uses a CrashCrafts-style high-contrast gaming palette that can be adjusted once official colors are available.
 
 ## Run without Docker
 

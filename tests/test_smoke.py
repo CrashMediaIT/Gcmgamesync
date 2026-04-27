@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from gcmgamesync_client.__main__ import validate_server_url
 from gcmgamesync_client.scanner import MANIFEST, detect_emulators, should_sync
 from gcmgamesync_server.auth import _totp, new_totp_secret, verify_totp
 from gcmgamesync_server.storage import write_versioned_file
@@ -38,7 +39,13 @@ class GcmSmokeTests(unittest.TestCase):
             for index in range(2, 9):
                 write_versioned_file(root, "u@example.com", "saves/a.sav", str(index).encode())
             versions = list((root / "versions" / "u@example.com" / "saves" / "a.sav").iterdir())
-            self.assertLessEqual(len(versions), 5)
+            self.assertLessEqual(len(versions), 4)
+
+    def test_client_requires_https_except_localhost(self):
+        self.assertEqual(validate_server_url("https://sync.example.com"), "https://sync.example.com")
+        self.assertEqual(validate_server_url("http://localhost:8080"), "http://localhost:8080")
+        with self.assertRaises(ValueError):
+            validate_server_url("http://sync.example.com")
 
     def test_totp_verification(self):
         secret = new_totp_secret()

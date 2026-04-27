@@ -1,7 +1,7 @@
 # Gcmgamesync roadmap
 
 ## MVP foundation
-- Docker-hosted server with web UI, user invitation, registration, 2FA, file storage, five-version retention, and client log ingestion.
+- Docker-hosted server with web UI, user invitation, registration, 2FA, file storage, five-total-copy retention, and client log ingestion.
 - Windows/Linux client that detects supported emulators, reports sync status, preserves device-local configuration, and uploads errors.
 - Emulator manifest for DuckStation, PCSX2 nightly, RPCS3 nightly, Xenia Canary, xemu, Cemu, RetroArch, Eden nightly, and Dolphin dev builds.
 
