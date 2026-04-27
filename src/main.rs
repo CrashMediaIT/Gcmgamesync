@@ -408,10 +408,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 .into_iter()
                 .flat_map(|users| users.values().cloned())
                 .map(|mut user| {
-                    user.as_object_mut().map(|object| {
+                    if let Some(object) = user.as_object_mut() {
                         object.remove("password_hash");
                         object.remove("totp_secret");
-                    });
+                    }
                     user
                 })
                 .collect::<Vec<_>>();
