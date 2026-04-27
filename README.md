@@ -86,6 +86,8 @@ docker compose up
 
 The container listens on **port `8080` inside the container**, mapped to **`8080` on the host** by `docker-compose.yml`. Persistent state (setup, users, invites, sessions, files, versions, uploaded logo, emulator bundles) lives in the `crash-crafts-game-sync-data` Docker volume mounted at `/data`.
 
+> **Container fails to start with `Permission denied`?** The server runs as a non-root user (`uid 10001`) and needs write access to `/data`. If you reused an existing Docker volume that was created by an older image (or a bind mount from the host), its files may be owned by a different UID. Either remove the stale volume — `docker compose down -v` — and let the container recreate it, or `chown -R 10001:10001` the mounted directory. Recent builds also include the failing path in the error message, e.g. `failed to initialize data directory /data: failed to set permissions on /data: Permission denied (os error 13)`.
+
 Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment, optional Office365 SMTP for invite emails, optional logo upload).
 
 ### 2. Put the server behind HTTPS
