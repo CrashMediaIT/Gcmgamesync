@@ -6,7 +6,7 @@ The server is a Docker-friendly Rust HTTP service with a first-run Web UI setup.
 
 ## Client
 
-The desktop foundation is a Rust CLI/daemon using a shared JSON config. The `setup-desktop` command writes server/auth, ROM roots, emulator roots, service preferences, and Steam ROM Manager settings. The `daemon` command can run once or continuously, scans configured emulator folders with the shared manifest, uploads save-compatible files, and pulls explicit remote paths into local folders. A later GUI can wrap these commands without replacing the Rust daemon.
+The desktop foundation is a Rust CLI/daemon companion for the Docker server using a shared JSON config. The default desktop entry point reports companion setup status instead of starting another server. The `setup-desktop` command writes server/auth, ROM roots, emulator roots, service preferences, and Steam ROM Manager settings. The `daemon` command can run once or continuously, scans configured emulator folders with the shared manifest, uploads save-compatible files to the Docker server, and pulls explicit remote paths into local folders. A later GUI can wrap these commands without replacing the Rust daemon.
 
 Desktop packaging is intentionally native: Windows uses an MSI/Windows Service, Linux uses native packages with a systemd user service, and Steam Deck game mode uses a Decky Loader companion plugin that reports status/control while the user service performs sync. Flatpak is deferred because sandboxing conflicts with broad folder monitoring and service installation.
 

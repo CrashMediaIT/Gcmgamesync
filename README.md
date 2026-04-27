@@ -47,6 +47,7 @@ cargo run -- server
 ## Client MVP
 
 ```bash
+cargo run -- companion
 cargo run -- manifest
 cargo run -- scan --root /path/to/emulators
 cargo run -- status --root /path/to/emulators
@@ -55,6 +56,12 @@ cargo run -- setup-desktop --server https://sync.example.com --token <token> --r
 cargo run -- daemon --once
 cargo run -- generate-srm
 ```
+
+The desktop builds are companion clients for the Docker-hosted server, not separate Docker
+variants. They configure local emulator paths, run the sync daemon, generate Steam ROM Manager
+presets, and call the Docker server APIs for storage and administration. The default binary entry
+point opens the companion status/setup guidance instead of starting a server; Docker continues to
+start the server explicitly with the `server` command.
 
 The desktop foundation stays in Rust and uses a shared JSON config file. On Linux the default path is
 `~/.config/crash-crafts-game-sync/desktop-config.json`; on Windows it is stored under
