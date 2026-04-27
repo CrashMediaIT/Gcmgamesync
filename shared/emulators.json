@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "file_versions_to_keep": 5,
+    "sync_only_changed_files": true,
+    "device_local_configuration": true,
+    "portable_mode_required": true
+  },
+  "emulators": [
+    {
+      "id": "duckstation",
+      "name": "DuckStation",
+      "channels": ["rolling"],
+      "homepage": "https://github.com/stenzek/duckstation",
+      "portable_markers": ["portable.txt", "settings.ini"],
+      "detect_paths": ["DuckStation", "duckstation"],
+      "sync_include": ["memcards/**", "savestates/**", "textures/**", "cheats/**"],
+      "sync_exclude": ["settings.ini", "**/inputprofiles/**", "**/controllers/**"],
+      "updates": {"windows": {"source": "github", "repo": "stenzek/duckstation"}, "linux": {"source": "manual-or-flatpak", "package": "org.duckstation.DuckStation"}}
+    },
+    {
+      "id": "pcsx2-nightly",
+      "name": "PCSX2 Nightly",
+      "channels": ["nightly"],
+      "homepage": "https://github.com/PCSX2/pcsx2/releases",
+      "portable_markers": ["portable.ini"],
+      "detect_paths": ["PCSX2", "pcsx2"],
+      "sync_include": ["memcards/**", "sstates/**", "cheats/**", "textures/**"],
+      "sync_exclude": ["inis/**", "**/LilyPad.ini", "**/PAD.ini"],
+      "updates": {"windows": {"source": "github", "repo": "PCSX2/pcsx2", "prerelease": true}, "linux": {"source": "appimage-or-flatpak", "package": "net.pcsx2.PCSX2"}}
+    },
+    {
+      "id": "rpcs3-nightly",
+      "name": "RPCS3 Nightly",
+      "channels": ["nightly"],
+      "homepage": "https://github.com/RPCS3/rpcs3-binaries-win/",
+      "portable_markers": ["GuiConfigs", "config.yml"],
+      "detect_paths": ["RPCS3", "rpcs3"],
+      "sync_include": ["dev_hdd0/home/**/savedata/**", "dev_hdd0/home/**/trophy/**"],
+      "sync_exclude": ["config.yml", "GuiConfigs/**", "InputConfigs/**", "cache/**"],
+      "updates": {"windows": {"source": "github", "repo": "RPCS3/rpcs3-binaries-win"}, "linux": {"source": "appimage", "repo": "RPCS3/rpcs3-binaries-linux"}}
+    },
+    {
+      "id": "xenia-canary",
+      "name": "Xenia Canary",
+      "channels": ["canary"],
+      "homepage": "https://github.com/xenia-canary/xenia-canary",
+      "portable_markers": ["portable.txt", "xenia-canary.config.toml"],
+      "detect_paths": ["xenia-canary", "Xenia Canary"],
+      "sync_include": ["content/**", "cache/title_storage/**"],
+      "sync_exclude": ["xenia-canary.config.toml", "portable.txt", "cache/shaders/**"],
+      "updates": {"windows": {"source": "github", "repo": "xenia-canary/xenia-canary"}, "linux": {"source": "unsupported"}}
+    },
+    {
+      "id": "xemu",
+      "name": "xemu",
+      "channels": ["stable", "continuous"],
+      "homepage": "https://github.com/xemu-project/xemu",
+      "portable_markers": ["xemu.toml"],
+      "detect_paths": ["xemu", "Xemu"],
+      "sync_include": ["eeprom.bin", "hdd/**", "saves/**"],
+      "sync_exclude": ["xemu.toml", "nv2a_cache/**"],
+      "updates": {"windows": {"source": "github", "repo": "xemu-project/xemu"}, "linux": {"source": "github", "repo": "xemu-project/xemu"}}
+    },
+    {
+      "id": "cemu",
+      "name": "Cemu",
+      "channels": ["stable", "prerelease"],
+      "homepage": "https://github.com/cemu-project/Cemu/releases/tag/v2.6",
+      "portable_markers": ["settings.xml"],
+      "detect_paths": ["Cemu", "cemu"],
+      "sync_include": ["mlc01/usr/save/**", "graphicPacks/downloadedGraphicPacks/**"],
+      "sync_exclude": ["settings.xml", "controllerProfiles/**", "log.txt", "shaderCache/**"],
+      "updates": {"windows": {"source": "github", "repo": "cemu-project/Cemu"}, "linux": {"source": "github", "repo": "cemu-project/Cemu"}}
+    },
+    {
+      "id": "retroarch",
+      "name": "RetroArch",
+      "channels": ["stable", "nightly"],
+      "homepage": "https://github.com/libretro/RetroArch",
+      "portable_markers": ["retroarch.cfg"],
+      "detect_paths": ["RetroArch", "retroarch"],
+      "sync_include": ["saves/**", "states/**", "system/**", "playlists/**"],
+      "sync_exclude": ["retroarch.cfg", "config/**", "autoconfig/**", "logs/**"],
+      "updates": {"windows": {"source": "buildbot", "channel": "nightly"}, "linux": {"source": "flatpak-or-buildbot", "package": "org.libretro.RetroArch"}}
+    },
+    {
+      "id": "eden-nightly",
+      "name": "Eden Nightly",
+      "channels": ["nightly"],
+      "homepage": "https://git.eden-emu.dev/eden-ci/nightly/releases",
+      "portable_markers": ["user"],
+      "detect_paths": ["Eden", "eden"],
+      "sync_include": ["user/nand/user/save/**", "user/sdmc/Nintendo/**"],
+      "sync_exclude": ["user/config/**", "user/log/**", "user/cache/**"],
+      "updates": {"windows": {"source": "eden-nightly"}, "linux": {"source": "eden-nightly"}}
+    },
+    {
+      "id": "dolphin-dev",
+      "name": "Dolphin Dev Build",
+      "channels": ["dev"],
+      "homepage": "https://dolphin-emu.org/download/?ref=btn",
+      "portable_markers": ["portable.txt", "User"],
+      "detect_paths": ["Dolphin", "dolphin-emu"],
+      "sync_include": ["User/GC/**", "User/Wii/title/**/data/**", "User/StateSaves/**", "User/Load/**"],
+      "sync_exclude": ["User/Config/**", "User/GameSettings/**", "User/Logs/**", "User/Cache/**"],
+      "updates": {"windows": {"source": "dolphin-dev", "channel": "dev"}, "linux": {"source": "flatpak-or-distro", "package": "org.DolphinEmu.dolphin-emu"}}
+    }
+  ]
+}

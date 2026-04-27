@@ -1,2 +1,47 @@
 # Gcmgamesync
-Docker and application to synchronize game saves
+
+Gcmgamesync is an emulator save backup and synchronization platform. The initial MVP in this repository provides a Docker-hosted server, a Python desktop-client scaffold for Windows/Linux, and a shared emulator manifest that defines save-data sync rules while excluding device-local configuration.
+
+## Goals
+
+- Synchronize emulator saves across devices.
+- Preserve five historical versions of changed files only.
+- Keep gamepad, path, graphics, and other user/device configuration local to each device.
+- Support admin-managed users, registration, required TOTP 2FA, server-side client logs, and emulator update metadata.
+- Track DuckStation, PCSX2 nightly, RPCS3 nightly, Xenia Canary, xemu, Cemu, RetroArch, Eden nightly, and Dolphin dev builds.
+
+## Run the server with Docker
+
+```bash
+docker compose up --build
+```
+
+The server listens on <http://localhost:8080>. Set `GCM_ADMIN_EMAIL` and `GCM_ADMIN_PASSWORD` before production use. On first boot, the server stores an admin TOTP provisioning URI in `/data/state.json` under `bootstrap_admin_otpauth`.
+
+## Run without Docker
+
+```bash
+PYTHONPATH=server:client GCM_DATA_DIR=/tmp/gcmgamesync-data GCM_ADMIN_EMAIL=admin@example.com GCM_ADMIN_PASSWORD='change-this-admin-password' python3 -m gcmgamesync_server
+```
+
+## Client MVP
+
+```bash
+PYTHONPATH=server:client python3 -m gcmgamesync_client manifest
+PYTHONPATH=server:client python3 -m gcmgamesync_client scan --root /path/to/emulators
+PYTHONPATH=server:client python3 -m gcmgamesync_client status --root /path/to/emulators
+```
+
+## HTTP API MVP
+
+- `GET /api/health` health check.
+- `GET /api/emulators` shared emulator manifest.
+- `POST /api/login` with `email`, `password`, and `totp_code`.
+- `POST /api/invites` admin-only invite creation.
+- `POST /api/register` invite-based registration that returns a TOTP secret/provisioning URI.
+- `PUT /api/files/{relative-path}` authenticated file upload with version retention.
+- `POST /api/logs` authenticated client log upload.
+
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md).
