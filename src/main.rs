@@ -1,8 +1,7 @@
 use base64::{Engine, engine::general_purpose};
 use data_encoding::BASE32_NOPAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
-use rand::{RngCore, rngs::OsRng};
 use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::Sha256;
@@ -117,9 +116,7 @@ impl JsonStore {
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {
-    let mut bytes = [0_u8; N];
-    OsRng.fill_bytes(&mut bytes);
-    bytes
+    rand::random()
 }
 
 fn hash_password(password: &str, salt: Option<&str>) -> String {
@@ -606,12 +603,13 @@ fn cmd_upload_log(args: &[String]) -> AppResult<()> {
         .map(|window| window[1].clone())
         .unwrap_or_else(|| "info".to_owned());
     let message = args.last().ok_or("message is required")?.clone();
-    let result: Value = ureq::post(&format!("{server}/api/logs"))
-        .set("Authorization", &format!("Bearer {token}"))
+    let mut response = ureq::post(&format!("{server}/api/logs"))
+        .header("Authorization", &format!("Bearer {token}"))
         .send_json(
             json!({"level": level, "message": message, "context": {"client": "gcmgamesync-cli"}}),
         )?
-        .into_json()?;
+        .into_body();
+    let result: Value = response.read_json()?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
