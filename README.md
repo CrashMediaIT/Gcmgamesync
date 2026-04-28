@@ -86,12 +86,9 @@ docker compose up
 
 The container listens on **port `8080` inside the container**, mapped to **`8080` on the host** by `docker-compose.yml`. It uses two persistent Docker volumes:
 
-- `crash-crafts-game-sync-config` mounted at **`/config`** — holds the encrypted application state (`state.json`) and the symmetric key (`state.key`) used to encrypt it. State at rest is encrypted with XChaCha20-Poly1305; the key file is generated on first start with `0600` permissions and never leaves the volume. Back up `/config` (state + key together) to be able to restore.
-- `crash-crafts-game-sync-data` mounted at **`/data`** — holds synchronized save files, version history, uploaded logo, and downloaded emulator bundles.
+> **Container fails to start with `Permission denied`?** The server runs as a non-root user (`uid 10001`) and needs write access to `/data`. If you reused an existing Docker volume that was created by an older image (or a bind mount from the host), its files may be owned by a different UID. Either remove the stale volume — `docker compose down -v` — and let the container recreate it, or `chown -R 10001:10001` the mounted directory. Recent builds also include the failing path in the error message, e.g. `failed to initialize data directory /data: failed to set permissions on /data: Permission denied (os error 13)`.
 
-**Encryption in transit:** the server itself speaks plain HTTP on `8080` and is intended to run behind an HTTPS reverse proxy (Caddy, nginx, Traefik, Cloudflare Tunnel, …); see *Put the server behind HTTPS* below. Responses always include `Strict-Transport-Security` so browsers pin the connection to TLS once HTTPS is reached. Desktop clients refuse to connect to non-localhost servers over plain `http://`.
-
-Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment via the displayed QR code, optional Office365 SMTP for invite emails, optional logo upload).
+Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment, optional Office365 SMTP for invite emails, optional logo upload).
 
 ### 2. Put the server behind HTTPS
 

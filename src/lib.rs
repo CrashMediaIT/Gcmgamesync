@@ -644,7 +644,7 @@ pub fn write_desktop_config(path: &Path, config: &DesktopConfig) -> AppResult<()
         secure_create_dir_all(parent)?;
     }
     let mut file = fs::File::create(path)?;
-    secure_file(&file)?;
+    secure_file(path, &file)?;
     file.write_all(&serde_json::to_vec_pretty(config)?)?;
     Ok(())
 }
@@ -738,7 +738,7 @@ pub fn pull_sync_file(
         secure_create_dir_all(parent)?;
     }
     let mut file = fs::File::create(destination)?;
-    secure_file(&file)?;
+    secure_file(destination, &file)?;
     file.write_all(&bytes)?;
     Ok(())
 }
@@ -895,7 +895,7 @@ pub fn write_srm_parsers(config: &DesktopConfig) -> AppResult<PathBuf> {
         secure_create_dir_all(parent)?;
     }
     let mut file = fs::File::create(&path)?;
-    secure_file(&file)?;
+    secure_file(&path, &file)?;
     file.write_all(&serde_json::to_vec_pretty(&srm_parser_presets(config))?)?;
     Ok(path)
 }
@@ -1010,7 +1010,7 @@ pub fn download_with_checksum(spec: &DownloadSpec, destination: &Path) -> AppRes
         }
     }
     let mut file = fs::File::create(destination)?;
-    secure_file(&file)?;
+    secure_file(destination, &file)?;
     file.write_all(&bytes)?;
     Ok(bytes.len() as u64)
 }
@@ -1228,7 +1228,7 @@ pub fn extract_bundle_into(
             fs::create_dir_all(parent)?;
         }
         let mut writer = fs::File::create(&target)?;
-        secure_file(&writer)?;
+        secure_file(&target, &writer)?;
         std::io::copy(&mut entry, &mut writer)?;
     }
     Ok(skipped)
@@ -1340,23 +1340,23 @@ struct JsonStore {
     cipher: chacha20poly1305::XChaCha20Poly1305,
 }
 
-/// Magic bytes identifying an encrypted state file. Lets the loader detect
-/// legacy plaintext state on disk and migrate it transparently.
-const STATE_MAGIC: &[u8; 4] = b"CCGS";
-/// Encrypted state file format version (allows future upgrades).
-const STATE_VERSION: u8 = 0x01;
-/// XChaCha20-Poly1305 nonce size in bytes.
-const STATE_NONCE_LEN: usize = 24;
-/// Length of the symmetric key used to encrypt the state file at rest.
-const STATE_KEY_LEN: usize = 32;
+/// Wrap an `io::Result` so that the resulting error names the path and
+/// operation that failed. Without this, errors bubbling up through
+/// `AppResult` are rendered as bare strings like `Permission denied (os error
+/// 13)` with no indication of which file or directory the process was trying
+/// to touch — an especially common source of confusion when the Docker
+/// container fails to start because the `/data` volume is owned by a
+/// different UID than the runtime user (uid `10001`).
+fn io_context<T>(op: &str, path: &Path, result: std::io::Result<T>) -> AppResult<T> {
+    result.map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+        format!("failed to {op} {}: {err}", path.display()).into()
+    })
+}
 
 impl JsonStore {
     fn new(path: PathBuf, key_path: PathBuf) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
-            secure_create_dir_all(parent)?;
-        }
-        if let Some(parent) = key_path.parent() {
-            secure_create_dir_all(parent)?;
+            io_context("create directory", parent, fs::create_dir_all(parent))?;
         }
         let key = load_or_create_state_key(&key_path)?;
         use chacha20poly1305::KeyInit;
@@ -1389,16 +1389,8 @@ impl JsonStore {
     }
 
     fn read(&self) -> AppResult<Value> {
-        let bytes = fs::read(&self.path)?;
-        if is_encrypted_state(&bytes) {
-            let plaintext = decrypt_state_bytes(&self.cipher, &bytes)?;
-            Ok(serde_json::from_slice(&plaintext)?)
-        } else {
-            // Defensive: a plaintext file should have been migrated by
-            // `new()`, but if one appears later (manual restore from
-            // backup, etc.) accept it and re-encrypt on the next write.
-            Ok(serde_json::from_slice(&bytes)?)
-        }
+        let bytes = io_context("read", &self.path, fs::read(&self.path))?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     fn write(&self, data: &Value) -> AppResult<()> {
@@ -1408,12 +1400,14 @@ impl JsonStore {
         let plaintext = serde_json::to_vec_pretty(data)?;
         let encrypted = encrypt_state_bytes(&self.cipher, &plaintext)?;
         let tmp = self.path.with_extension("tmp");
-        let mut file = fs::File::create(&tmp)?;
-        secure_file(&file)?;
-        file.write_all(&encrypted)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(tmp, &self.path)?;
+        let mut file = io_context("create", &tmp, fs::File::create(&tmp))?;
+        secure_file(&tmp, &file)?;
+        io_context(
+            "write",
+            &tmp,
+            file.write_all(&serde_json::to_vec_pretty(data)?),
+        )?;
+        io_context("rename", &self.path, fs::rename(&tmp, &self.path))?;
         Ok(())
     }
 }
@@ -1495,7 +1489,7 @@ fn load_or_create_state_key(path: &Path) -> AppResult<[u8; STATE_KEY_LEN]> {
 }
 
 fn secure_create_dir_all(path: &Path) -> AppResult<()> {
-    fs::create_dir_all(path)?;
+    io_context("create directory", path, fs::create_dir_all(path))?;
     secure_dir(path)?;
     Ok(())
 }
@@ -1503,8 +1497,11 @@ fn secure_create_dir_all(path: &Path) -> AppResult<()> {
 #[cfg(unix)]
 fn secure_dir(path: &Path) -> AppResult<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    io_context(
+        "set permissions on",
+        path,
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)),
+    )
 }
 
 #[cfg(not(unix))]
@@ -1513,14 +1510,17 @@ fn secure_dir(_path: &Path) -> AppResult<()> {
 }
 
 #[cfg(unix)]
-fn secure_file(file: &fs::File) -> AppResult<()> {
+fn secure_file(path: &Path, file: &fs::File) -> AppResult<()> {
     use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    io_context(
+        "set permissions on",
+        path,
+        file.set_permissions(fs::Permissions::from_mode(0o600)),
+    )
 }
 
 #[cfg(not(unix))]
-fn secure_file(_file: &fs::File) -> AppResult<()> {
+fn secure_file(_path: &Path, _file: &fs::File) -> AppResult<()> {
     Ok(())
 }
 
@@ -1977,7 +1977,7 @@ fn write_versioned_file(
     }
     if changed {
         let mut file = fs::File::create(&base)?;
-        secure_file(&file)?;
+        secure_file(&base, &file)?;
         file.write_all(content)?;
     }
     let versions_kept = fs::read_dir(&version_dir)?.count();
@@ -3371,10 +3371,21 @@ fn run_server(args: &[String]) -> AppResult<()> {
     let host = optional_arg_value(args, "--host", "127.0.0.1");
     let port = optional_arg_value(args, "--port", "8080");
     let server = Server::http(format!("{host}:{port}"))?;
+    let store =
+        bootstrap_store(&data_dir).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+            format!(
+                "failed to initialize data directory {}: {err} \
+                 (the directory must be writable by the container's runtime user; \
+                 if you reused an existing Docker volume from a previous build, \
+                 either remove it with `docker volume rm <name>` or `chown` its \
+                 contents to the container user)",
+                data_dir.display(),
+            )
+            .into()
+        })?;
     let state = Arc::new(AppState {
         data_dir: data_dir.clone(),
-        config_dir: config_dir.clone(),
-        store: Mutex::new(bootstrap_store(&config_dir, &data_dir)?),
+        store: Mutex::new(store),
     });
     println!("{APP_NAME} server listening on http://{host}:{port}");
     println!(
