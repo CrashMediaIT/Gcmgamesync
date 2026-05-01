@@ -46,6 +46,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Match the other workflows: each Docker rebuild bakes a fresh
+      # date-based Cargo version into the image so the running binary
+      # reports a unique version (`YYYY.MMDD.<run_number>`) rather than
+      # the static `0.1.0` from the committed `Cargo.toml`.
+      - name: Set date-based version
+        run: |
+          VERSION="$(date -u +'%Y').$((10#$(date -u +'%m%d'))).${{ github.run_number }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          sed -i "/^name = \"crash-crafts-game-sync\"/{n;s/^version = \".*\"/version = \"${VERSION}\"/}" Cargo.lock
+
       - name: Build image
         uses: docker/build-push-action@v6
         with:

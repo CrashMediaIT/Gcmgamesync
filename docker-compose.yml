@@ -1,18 +1,58 @@
 services:
   crash-crafts-game-sync:
     build: .
+    # `pull_policy: build` tells `docker compose up` to always use the local
+    # build of `Dockerfile` instead of any cached registry image. Combined
+    # with running `docker compose up --build` (see README), this ensures
+    # source-code changes are actually picked up by the running container —
+    # plain `docker compose up` was silently reusing a stale image and
+    # masking the fix.
+    pull_policy: build
     container_name: crash-crafts-game-sync
     ports:
       - "8080:8080"
+    # Override these to match the uid/gid that owns the host directory or
+    # NAS dataset mounted at /data. The entrypoint chowns /data to PUID:PGID
+    # and drops privileges to that identity before exec'ing the server, so
+    # writes succeed even when the host volume is owned by, say, the
+    # TrueNAS Scale `apps` user (568:568) or an Unraid `nobody` (99:100).
+    # Defaults to 10001:10001, the user baked into the image.
+    environment:
+      PUID: "10001"
+      PGID: "10001"
     init: true
     read_only: true
     # Always restart the container so a transient startup failure (for example
     # while the `/data` volume is being initialized) doesn't leave the service
     # offline. `unless-stopped` still honours `docker compose down`.
     restart: unless-stopped
+    # The entrypoint starts as root so it can repair `/data` ownership on a
+    # stale named volume (see docker-entrypoint.sh) and then drops to uid
+    # 10001 via `setpriv` before exec'ing the server. We therefore drop ALL
+    # capabilities and add back only the narrow set the entrypoint actually
+    # needs:
+    #   CHOWN          – chown /data to the runtime UID
+    #   FOWNER         – ignore "owner of file is root" checks during chown -R
+    #   DAC_READ_SEARCH – traverse /data when a stale dir lacks +x for root
+    #                     (write access isn't needed; chown only edits inode
+    #                     metadata which is gated by CAP_CHOWN above)
+    #   SETUID/SETGID  – drop privileges to the non-root runtime user
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      # Read+traverse only — sufficient for `chown -R /data` to descend a
+      # tree owned by another uid (the chown syscall itself is gated by
+      # CAP_CHOWN above, not by the DAC_* caps). DAC_OVERRIDE would also
+      # bypass write permission checks, which the entrypoint does not need.
+      - DAC_READ_SEARCH
+      - SETUID
+      - SETGID
     security_opt:
+      # Blocks any execve() from gaining new privileges (suid binaries, file
+      # caps). It does NOT block voluntary privilege drops, so `setpriv`
+      # going from uid 0 → uid 10001 still works.
       - no-new-privileges:true
     tmpfs:
       - /tmp
@@ -20,7 +60,9 @@ services:
       # Persistent application state: setup wizard data, users, invites,
       # sessions, uploaded logo, file/version storage, and emulator bundles.
       # The Dockerfile chowns /data to uid 10001 so a fresh named volume
-      # inherits the correct ownership for the non-root runtime user.
+      # inherits the correct ownership for the non-root runtime user; if
+      # the volume was created by an older image and is still root-owned,
+      # docker-entrypoint.sh repairs it on each boot.
       - crash-crafts-game-sync-data:/data
     # Bound, rotated json-file logs so `docker compose logs` (and
     # `docker logs crash-crafts-game-sync`) keep working even if the

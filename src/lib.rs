@@ -3252,7 +3252,13 @@ fn run_server(args: &[String]) -> AppResult<()> {
     let data_dir = PathBuf::from(optional_arg_value(args, "--data-dir", "/data"));
     let host = optional_arg_value(args, "--host", "127.0.0.1");
     let port = optional_arg_value(args, "--port", "8080");
-    let server = Server::http(format!("{host}:{port}"))?;
+    // Step-by-step stderr logging so a crash-loop in Docker prints a
+    // breadcrumb trail in `docker logs` instead of an empty buffer. stderr
+    // is line-buffered, so each `eprintln!` is flushed before we move on.
+    eprintln!(
+        "{APP_NAME}: preparing data directory {} (host={host} port={port})",
+        data_dir.display()
+    );
     let store =
         bootstrap_store(&data_dir).map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
             format!(
@@ -3265,11 +3271,17 @@ fn run_server(args: &[String]) -> AppResult<()> {
             )
             .into()
         })?;
+    eprintln!("{APP_NAME}: binding TCP listener on {host}:{port}");
+    let server = Server::http(format!("{host}:{port}")).map_err(
+        |err| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("failed to bind {host}:{port}: {err}").into()
+        },
+    )?;
     let state = Arc::new(AppState {
         data_dir: data_dir.clone(),
         store: Mutex::new(store),
     });
-    println!("{APP_NAME} server listening on http://{host}:{port}");
+    eprintln!("{APP_NAME} server listening on http://{host}:{port}");
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
         std::thread::spawn(move || handle_request(request, state));
