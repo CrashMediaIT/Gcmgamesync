@@ -88,7 +88,9 @@ The container listens on **port `8080` inside the container**, mapped to **`8080
 
 > **Container fails to start with `Permission denied`?** The server runs as a non-root user (`uid 10001`) and needs write access to `/data`. If you reused an existing Docker volume that was created by an older image (or a bind mount from the host), its files may be owned by a different UID. Either remove the stale volume — `docker compose down -v` — and let the container recreate it, or `chown -R 10001:10001` the mounted directory. Recent builds also include the failing path in the error message, e.g. `failed to initialize data directory /data: failed to set permissions on /data: Permission denied (os error 13)`.
 
-Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment, optional Office365 SMTP for invite emails, optional logo upload).
+> **Container crashes immediately and `docker compose logs` is empty?** The shipped `docker-compose.yml` sets `restart: unless-stopped` and a bounded `json-file` log driver (`max-size: 10m`, `max-file: 5`) so logs survive restart loops. Tail them with `docker logs --tail=200 crash-crafts-game-sync` (the container is named so `docker logs` works without looking up an ID) or `docker compose logs -f crash-crafts-game-sync`.
+
+Open <http://localhost:8080> in a browser and complete the first-run setup page (admin email + password, TOTP enrollment, optional Office365 SMTP for invite emails, optional logo upload). After submitting the setup form the page renders a **QR code** containing the admin's TOTP secret — scan it with your authenticator app, then click **Continue to sign in**.
 
 ### 2. Put the server behind HTTPS
 

@@ -1514,6 +1514,26 @@ fn otpauth_uri(email: &str, secret: &str) -> String {
     )
 }
 
+/// Render the given `otpauth://` URI as a scannable QR code, encoded as a
+/// `data:image/svg+xml;base64,...` URL. Returned alongside `otpauth_uri` from
+/// the setup and invite-completion endpoints so the Web UI can show a QR code
+/// the admin can scan with their authenticator app — previously only the raw
+/// URI was returned and no QR code was rendered on the setup screen.
+fn otpauth_qr_svg(uri: &str) -> String {
+    let svg = match qrcode::QrCode::new(uri.as_bytes()) {
+        Ok(code) => code
+            .render::<qrcode::render::svg::Color>()
+            .min_dimensions(240, 240)
+            .quiet_zone(true)
+            .build(),
+        Err(_) => return String::new(),
+    };
+    format!(
+        "data:image/svg+xml;base64,{}",
+        general_purpose::STANDARD.encode(svg.as_bytes())
+    )
+}
+
 fn new_token() -> String {
     general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>())
 }
@@ -2061,6 +2081,8 @@ fn render_ui(data: &Value) -> String {
       <label>SMTP from email<input name="smtp_from_email" type="email" required></label>
       <button type="submit">Complete secure setup</button>
       <p id="setup-result" class="result"></p>
+      <img id="setup-qr" alt="" class="hidden" width="240" height="240">
+      <button type="button" id="setup-continue" class="hidden">Continue to sign in</button>
     </form>
   </section>
 
@@ -2684,10 +2706,11 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             });
             data["setup_complete"] = json!(true);
             let otpauth = otpauth_uri(&email, &secret);
+            let otpauth_qr = otpauth_qr_svg(&otpauth);
             store.write(&data)?;
             Ok(json_response(
                 201,
-                json!({"ok": true, "email": email, "otpauth_uri": otpauth}),
+                json!({"ok": true, "email": email, "otpauth_uri": otpauth, "otpauth_qr_svg": otpauth_qr}),
             ))
         }
         (Method::Get, "/api/users") => {
@@ -2808,9 +2831,11 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 invites.remove(invite_token);
             }
             store.write(&data)?;
+            let otpauth = otpauth_uri(&email, &secret);
+            let otpauth_qr = otpauth_qr_svg(&otpauth);
             Ok(json_response(
                 201,
-                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth_uri(&email, &secret)}),
+                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_svg": otpauth_qr}),
             ))
         }
         (Method::Post, "/api/login") => {
@@ -4752,6 +4777,15 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("otpauth://")
+        );
+        // The setup response must also expose a scannable QR code so the
+        // first-run admin can enrol their authenticator app from the Web UI
+        // without copy/pasting the otpauth URI by hand.
+        assert!(
+            setup["otpauth_qr_svg"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,")
         );
         // Mint an admin session by injecting one directly so the test does
         // not need a real TOTP roundtrip.

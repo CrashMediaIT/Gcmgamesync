@@ -1,10 +1,15 @@
 services:
   crash-crafts-game-sync:
     build: .
+    container_name: crash-crafts-game-sync
     ports:
       - "8080:8080"
     init: true
     read_only: true
+    # Always restart the container so a transient startup failure (for example
+    # while the `/data` volume is being initialized) doesn't leave the service
+    # offline. `unless-stopped` still honours `docker compose down`.
+    restart: unless-stopped
     cap_drop:
       - ALL
     security_opt:
@@ -12,6 +17,20 @@ services:
     tmpfs:
       - /tmp
     volumes:
+      # Persistent application state: setup wizard data, users, invites,
+      # sessions, uploaded logo, file/version storage, and emulator bundles.
+      # The Dockerfile chowns /data to uid 10001 so a fresh named volume
+      # inherits the correct ownership for the non-root runtime user.
       - crash-crafts-game-sync-data:/data
+    # Bound, rotated json-file logs so `docker compose logs` (and
+    # `docker logs crash-crafts-game-sync`) keep working even if the
+    # container is in a crash/restart loop. Without rotation a noisy
+    # crash loop can fill the host disk and make logs unreadable.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 volumes:
   crash-crafts-game-sync-data:
+    name: crash-crafts-game-sync-data
