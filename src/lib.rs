@@ -1515,22 +1515,58 @@ fn otpauth_uri(email: &str, secret: &str) -> String {
 }
 
 /// Render the given `otpauth://` URI as a scannable QR code, encoded as a
-/// `data:image/svg+xml;base64,...` URL. Returned alongside `otpauth_uri` from
+/// `data:image/png;base64,...` URL. Returned alongside `otpauth_uri` from
 /// the setup and invite-completion endpoints so the Web UI can show a QR code
 /// the admin can scan with their authenticator app — previously only the raw
 /// URI was returned and no QR code was rendered on the setup screen.
-fn otpauth_qr_svg(uri: &str) -> String {
-    let svg = match qrcode::QrCode::new(uri.as_bytes()) {
-        Ok(code) => code
-            .render::<qrcode::render::svg::Color>()
-            .min_dimensions(240, 240)
-            .quiet_zone(true)
-            .build(),
+///
+/// A raster PNG is used (rather than an SVG data URL) because PNGs render with
+/// crisp integer-sized modules in every browser and screenshot-to-scan tool,
+/// which makes the QR reliably scannable by mobile authenticator apps.
+fn otpauth_qr_png(uri: &str) -> String {
+    let code = match qrcode::QrCode::new(uri.as_bytes()) {
+        Ok(code) => code,
         Err(_) => return String::new(),
     };
+    let modules = code.width();
+    let colors = code.to_colors();
+    // Standard QR quiet zone is 4 modules on every side.
+    const QUIET: usize = 4;
+    // Pick the smallest integer scale that yields at least ~256px wide.
+    let total_modules = modules + 2 * QUIET;
+    let scale = ((256 + total_modules - 1) / total_modules).max(4);
+    let side_px = total_modules * scale;
+    let mut buf = vec![0xFFu8; side_px * side_px];
+    for my in 0..modules {
+        for mx in 0..modules {
+            if colors[my * modules + mx] == qrcode::types::Color::Dark {
+                let x0 = (QUIET + mx) * scale;
+                let y0 = (QUIET + my) * scale;
+                for dy in 0..scale {
+                    let row = (y0 + dy) * side_px;
+                    for dx in 0..scale {
+                        buf[row + x0 + dx] = 0x00;
+                    }
+                }
+            }
+        }
+    }
+    let mut png_bytes: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, side_px as u32, side_px as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = match encoder.write_header() {
+            Ok(w) => w,
+            Err(_) => return String::new(),
+        };
+        if writer.write_image_data(&buf).is_err() {
+            return String::new();
+        }
+    }
     format!(
-        "data:image/svg+xml;base64,{}",
-        general_purpose::STANDARD.encode(svg.as_bytes())
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(&png_bytes)
     )
 }
 
@@ -2706,11 +2742,11 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             });
             data["setup_complete"] = json!(true);
             let otpauth = otpauth_uri(&email, &secret);
-            let otpauth_qr = otpauth_qr_svg(&otpauth);
+            let otpauth_qr = otpauth_qr_png(&otpauth);
             store.write(&data)?;
             Ok(json_response(
                 201,
-                json!({"ok": true, "email": email, "otpauth_uri": otpauth, "otpauth_qr_svg": otpauth_qr}),
+                json!({"ok": true, "email": email, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr}),
             ))
         }
         (Method::Get, "/api/users") => {
@@ -2832,10 +2868,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             }
             store.write(&data)?;
             let otpauth = otpauth_uri(&email, &secret);
-            let otpauth_qr = otpauth_qr_svg(&otpauth);
+            let otpauth_qr = otpauth_qr_png(&otpauth);
             Ok(json_response(
                 201,
-                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_svg": otpauth_qr}),
+                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr}),
             ))
         }
         (Method::Post, "/api/login") => {
@@ -4793,12 +4829,12 @@ mod tests {
         // The setup response must also expose a scannable QR code so the
         // first-run admin can enrol their authenticator app from the Web UI
         // without copy/pasting the otpauth URI by hand.
-        assert!(
-            setup["otpauth_qr_svg"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:image/svg+xml;base64,")
-        );
+        let qr = setup["otpauth_qr_png"].as_str().unwrap();
+        assert!(qr.starts_with("data:image/png;base64,"));
+        let qr_bytes = general_purpose::STANDARD
+            .decode(qr.trim_start_matches("data:image/png;base64,"))
+            .unwrap();
+        assert!(qr_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
         // Mint an admin session by injecting one directly so the test does
         // not need a real TOTP roundtrip.
         let admin_token = {

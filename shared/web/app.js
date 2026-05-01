@@ -588,8 +588,8 @@
             "good"
           );
           const qr = document.getElementById("setup-qr");
-          if (qr && result.body.otpauth_qr_svg) {
-            qr.src = result.body.otpauth_qr_svg;
+          if (qr && result.body.otpauth_qr_png) {
+            qr.src = result.body.otpauth_qr_png;
             qr.alt = "TOTP QR code for " + result.body.email;
             qr.classList.remove("hidden");
           }
