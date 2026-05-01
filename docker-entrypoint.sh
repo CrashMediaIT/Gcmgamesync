@@ -40,18 +40,18 @@ DATA_DIR="${CCGS_DATA_DIR:-/data}"
 # Defensive validation: PUID/PGID must be non-negative integers, otherwise
 # `chown` and `setpriv` would either fail with confusing errors or silently
 # end up running as the wrong identity.
-case "$TARGET_UID" in
-    ''|*[!0-9]*)
-        printf 'entrypoint: PUID=%s is not a non-negative integer\n' "$TARGET_UID" >&2
-        exit 1
-        ;;
-esac
-case "$TARGET_GID" in
-    ''|*[!0-9]*)
-        printf 'entrypoint: PGID=%s is not a non-negative integer\n' "$TARGET_GID" >&2
-        exit 1
-        ;;
-esac
+require_uint() {
+    name="$1"
+    value="$2"
+    case "$value" in
+        ''|*[!0-9]*)
+            printf 'entrypoint: %s=%s is not a non-negative integer\n' "$name" "$value" >&2
+            exit 1
+            ;;
+    esac
+}
+require_uint PUID "$TARGET_UID"
+require_uint PGID "$TARGET_GID"
 
 log() {
     # Write to stderr so messages appear immediately in `docker logs`

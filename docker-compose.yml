@@ -31,16 +31,22 @@ services:
     # 10001 via `setpriv` before exec'ing the server. We therefore drop ALL
     # capabilities and add back only the narrow set the entrypoint actually
     # needs:
-    #   CHOWN        – chown /data to the runtime UID
-    #   FOWNER       – ignore "owner of file is root" checks during chown -R
-    #   DAC_OVERRIDE – traverse /data even if a stale dir lacks +x for root
-    #   SETUID/SETGID – drop privileges to the non-root runtime user
+    #   CHOWN          – chown /data to the runtime UID
+    #   FOWNER         – ignore "owner of file is root" checks during chown -R
+    #   DAC_READ_SEARCH – traverse /data when a stale dir lacks +x for root
+    #                     (write access isn't needed; chown only edits inode
+    #                     metadata which is gated by CAP_CHOWN above)
+    #   SETUID/SETGID  – drop privileges to the non-root runtime user
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - FOWNER
-      - DAC_OVERRIDE
+      # Read+traverse only — sufficient for `chown -R /data` to descend a
+      # tree owned by another uid (the chown syscall itself is gated by
+      # CAP_CHOWN above, not by the DAC_* caps). DAC_OVERRIDE would also
+      # bypass write permission checks, which the entrypoint does not need.
+      - DAC_READ_SEARCH
       - SETUID
       - SETGID
     security_opt:
