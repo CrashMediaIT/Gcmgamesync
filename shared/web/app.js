@@ -584,14 +584,33 @@
         if (result.ok) {
           setMessage(
             "setup-result",
-            "Setup complete. Save this TOTP URI in your authenticator: " + result.body.otpauth_uri,
+            "Setup complete. Scan the QR code below with your authenticator app, or save this TOTP URI: " + result.body.otpauth_uri,
             "good"
           );
+          const qr = document.getElementById("setup-qr");
+          if (qr && result.body.otpauth_qr_svg) {
+            qr.src = result.body.otpauth_qr_svg;
+            qr.alt = "TOTP QR code for " + result.body.email;
+            qr.classList.remove("hidden");
+          }
+          const cont = document.getElementById("setup-continue");
+          if (cont) {
+            cont.classList.remove("hidden");
+          }
           state.setupComplete = true;
-          setTimeout(showAuth, 200);
+          // Do not auto-redirect: the admin needs time to scan the QR code
+          // with their authenticator app before the setup view is replaced
+          // by the login form.
         } else {
           setMessage("setup-result", result.body.error || "Setup failed.", "error");
         }
+      });
+    }
+
+    const setupContinue = document.getElementById("setup-continue");
+    if (setupContinue) {
+      setupContinue.addEventListener("click", () => {
+        showAuth();
       });
     }
 
