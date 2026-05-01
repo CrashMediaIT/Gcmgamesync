@@ -33,6 +33,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Bump the Cargo version to a unique date-based value on every Docker
+      # rebuild so each image is published under a distinct version tag
+      # (and the same version is baked into the binary's `Cargo.toml`).
+      # Without this every rebuild would ship as `0.1.0`, hiding which
+      # build is actually running on a host.
+      - name: Set date-based version
+        run: |
+          VERSION="$(date -u +'%Y').$((10#$(date -u +'%m%d'))).${{ github.run_number }}"
+          echo "IMAGE_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          sed -i "/^name = \"crash-crafts-game-sync\"/{n;s/^version = \".*\"/version = \"${VERSION}\"/}" Cargo.lock
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push_image)
         uses: docker/login-action@v3
@@ -50,6 +62,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
+            type=raw,value=${{ env.IMAGE_VERSION }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and optionally push
