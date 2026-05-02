@@ -90,43 +90,166 @@ pub fn detect_emulators(root: &Path) -> Vec<Value> {
         .into_iter()
         .flatten()
         .filter_map(|emulator| {
-            emulator["detect_paths"]
-                .as_array()?
-                .iter()
-                .find_map(|candidate| {
-                    let candidate = candidate.as_str()?;
-                    let path = root.join(candidate);
-                    if !path.exists() {
-                        return None;
-                    }
-                    let portable = emulator["portable_markers"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .any(|marker| path.join(marker).exists());
-                    let update_policy = emulator["updates"]
-                        .get(os)
-                        .cloned()
-                        .unwrap_or_else(|| json!({"source": "unsupported"}));
-                    let save_paths: Vec<String> = emulator["save_paths"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(|sub| path.join(sub).to_string_lossy().into_owned())
-                        .collect();
-                    Some(json!({
-                        "id": emulator["id"],
-                        "name": emulator["name"],
-                        "path": path.to_string_lossy(),
-                        "portable": portable,
-                        "update_policy": update_policy,
-                        "save_paths": save_paths
-                    }))
-                })
+            let install_dir = locate_emulator_install(root, emulator)?;
+            let portable = emulator["portable_markers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|marker| install_dir.join(marker).exists());
+            let update_policy = emulator["updates"]
+                .get(os)
+                .cloned()
+                .unwrap_or_else(|| json!({"source": "unsupported"}));
+            let save_paths: Vec<String> = emulator["save_paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|sub| install_dir.join(sub).to_string_lossy().into_owned())
+                .collect();
+            Some(json!({
+                "id": emulator["id"],
+                "name": emulator["name"],
+                "path": install_dir.to_string_lossy(),
+                "portable": portable,
+                "update_policy": update_policy,
+                "save_paths": save_paths
+            }))
         })
         .collect()
+}
+
+/// Resolve which directory inside (or equal to) `root` is the install dir for
+/// `emulator`. The lookup is more forgiving than a literal `root.join(name)`
+/// existence check so we still match the real-world install folders that
+/// upstream produces — versioned (`pcsx2-v1.7.5945-windows-x64-Qt`),
+/// case-mismatched on Linux (`Xenia_Canary` vs the manifest's
+/// `xenia-canary`), or the install dir the user pointed `--emulator-root`
+/// directly at instead of its parent (`~/games/Dolphin-x86_64.AppImage`).
+///
+/// Resolution order, returning the first match:
+///   1. `root.join(candidate)` for every literal `detect_paths` entry
+///      (preserves the original exact-match behaviour and the related tests).
+///   2. Any immediate child directory of `root` whose name matches a
+///      `detect_paths` entry as a case-insensitive glob.
+///   3. `root` itself when its basename matches a `detect_paths` glob, or
+///      when it directly contains one of the manifest's `detect_executables`.
+///   4. Any immediate child directory of `root` that contains one of the
+///      manifest's `detect_executables` (last-resort fallback for fully
+///      renamed install folders).
+fn locate_emulator_install(root: &Path, emulator: &Value) -> Option<PathBuf> {
+    let detect_paths: Vec<&str> = emulator["detect_paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let detect_execs: Vec<String> = emulator
+        .get("detect_executables")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 1. Exact-name match inside the root.
+    for candidate in &detect_paths {
+        let direct = root.join(candidate);
+        if direct.exists() {
+            return Some(direct);
+        }
+    }
+
+    // Snapshot the immediate children of `root` once for the glob /
+    // case-insensitive / executable-presence passes.
+    let entries: Vec<(PathBuf, bool)> = fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            (path, is_dir)
+        })
+        .collect();
+
+    // 2. Glob / case-insensitive match against immediate child directories.
+    for (path, is_dir) in &entries {
+        if !*is_dir {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let name_str = name.to_string_lossy();
+        if matches_any_detect_pattern(&name_str, &detect_paths) {
+            return Some(path.clone());
+        }
+    }
+
+    // 3. The configured root might be the install dir itself.
+    let root_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !root_name.is_empty() && matches_any_detect_pattern(&root_name, &detect_paths) {
+        return Some(root.to_path_buf());
+    }
+    if !detect_execs.is_empty() && dir_contains_any_executable(root, &detect_execs) {
+        return Some(root.to_path_buf());
+    }
+
+    // 4. Executable fallback for immediate child directories.
+    if !detect_execs.is_empty() {
+        for (path, is_dir) in &entries {
+            if !*is_dir {
+                continue;
+            }
+            if dir_contains_any_executable(path, &detect_execs) {
+                return Some(path.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn matches_any_detect_pattern(name: &str, patterns: &[&str]) -> bool {
+    let lower_name = name.to_lowercase();
+    patterns.iter().any(|pattern| {
+        let lower_pattern = pattern.to_lowercase();
+        if lower_pattern == lower_name {
+            return true;
+        }
+        if lower_pattern.contains('*')
+            || lower_pattern.contains('?')
+            || lower_pattern.contains('[')
+        {
+            glob::Pattern::new(&lower_pattern)
+                .map(|pat| pat.matches(&lower_name))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    })
+}
+
+fn dir_contains_any_executable(dir: &Path, lowercased_executables: &[String]) -> bool {
+    let Ok(read) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if lowercased_executables.iter().any(|exe| exe == &name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Create the per-emulator portable-mode marker file inside `install_dir` so
@@ -4081,6 +4204,86 @@ mod tests {
         let found = detect_emulators(temp.path());
         assert_eq!(found[0]["id"], "duckstation");
         assert_eq!(found[0]["portable"], true);
+    }
+
+    #[test]
+    fn detect_emulators_matches_versioned_install_dirs() {
+        // Real-world install folders are versioned (PCSX2 nightlies),
+        // case-mismatched (Xenia Canary), or use a brand-name binary that
+        // the user dropped into a custom folder (Dolphin AppImage). The
+        // detector must still recognize all of them.
+        let temp = TempDir::new().unwrap();
+
+        // PCSX2 nightly: pcsx2-v1.7.5945-windows-x64-Qt
+        let pcsx2 = temp.path().join("pcsx2-v1.7.5945-windows-x64-Qt");
+        fs::create_dir_all(&pcsx2).unwrap();
+        fs::write(pcsx2.join("portable.ini"), "").unwrap();
+
+        // Xenia Canary, lower-case underscore form (common on Linux).
+        let xenia = temp.path().join("xenia_canary");
+        fs::create_dir_all(&xenia).unwrap();
+        fs::write(xenia.join("xenia_canary.exe"), "").unwrap();
+
+        // Dolphin dev: a renamed sibling folder containing only the
+        // AppImage binary — must be matched via detect_executables.
+        let dolphin_parent = temp.path().join("emus-dolphin-test");
+        fs::create_dir_all(&dolphin_parent).unwrap();
+        fs::write(dolphin_parent.join("Dolphin-x86_64.AppImage"), "").unwrap();
+
+        let found = detect_emulators(temp.path());
+        let by_id = |id: &str| {
+            found
+                .iter()
+                .find(|e| e["id"].as_str() == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("expected to detect {id}"))
+        };
+
+        let pcsx2_entry = by_id("pcsx2-nightly");
+        assert!(
+            pcsx2_entry["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("pcsx2-v1.7.5945-windows-x64-Qt"),
+            "pcsx2 path was {}",
+            pcsx2_entry["path"]
+        );
+        assert_eq!(pcsx2_entry["portable"], true);
+
+        let xenia_entry = by_id("xenia-canary");
+        assert!(
+            xenia_entry["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("xenia_canary"),
+            "xenia path was {}",
+            xenia_entry["path"]
+        );
+
+        let dolphin_entry = by_id("dolphin-dev");
+        assert!(
+            dolphin_entry["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("emus-dolphin-test"),
+            "dolphin path was {}",
+            dolphin_entry["path"]
+        );
+    }
+
+    #[test]
+    fn detect_emulators_recognizes_root_when_user_points_at_install_dir() {
+        // A user who points --emulator-root at the actual install folder
+        // (not its parent) must still see the emulator detected.
+        let temp = TempDir::new().unwrap();
+        let install = temp.path().join("dolphin-master-5.0-21250-x64");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("Dolphin.exe"), "").unwrap();
+        let found = detect_emulators(&install);
+        assert!(
+            found.iter().any(|e| e["id"].as_str() == Some("dolphin-dev")),
+            "expected dolphin-dev when root is the install dir, found={found:?}"
+        );
     }
 
     #[test]
