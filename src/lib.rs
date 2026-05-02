@@ -2539,9 +2539,11 @@ fn render_ui(data: &Value) -> String {
     <div class="logo">@LOGO@<span>@APP@</span></div>
     <div class="nav-tabs">
       <a href="#" class="nav-link active" data-view="dashboard">Dashboard</a>
-      <a href="#" class="nav-link" data-view="devices">Devices</a>
-      <a href="#" class="nav-link" data-view="files">Files</a>
-      <a href="#" class="nav-link admin-only" data-view="users">Users &amp; invites</a>
+      <a href="#" class="nav-link admin-only" data-view="devices">Devices</a>
+      <a href="#" class="nav-link" data-view="emulators">Emulators</a>
+      <a href="#" class="nav-link" data-view="saves">Game Saves</a>
+      <a href="#" class="nav-link admin-or-group-admin" data-view="users">Users &amp; groups</a>
+      <a href="#" class="nav-link" data-view="account">My account</a>
       <a href="#" class="nav-link admin-only" data-view="logs">Logs</a>
       <a href="#" class="nav-link admin-only" data-view="settings">Settings</a>
     </div>
@@ -2566,6 +2568,7 @@ fn render_ui(data: &Value) -> String {
       <button type="submit">Complete secure setup</button>
       <p id="setup-result" class="result"></p>
       <img id="setup-qr" alt="" class="hidden" width="240" height="240">
+      <div id="setup-token" class="card hidden mt"><h3>Desktop API token</h3><p class="muted">Paste this into the desktop client's <code>auth_token</code> field. It is shown only once; revoke or mint new tokens later under "My account".</p><pre id="setup-token-value"></pre></div>
       <button type="button" id="setup-continue" class="hidden">Continue to sign in</button>
     </form>
   </section>
@@ -2599,27 +2602,58 @@ fn render_ui(data: &Value) -> String {
       </section>
     </section>
 
-    <section class="view hidden" data-view="devices">
+    <section class="view hidden admin-only" data-view="devices">
       <h2>Devices</h2>
       <p class="muted">Desktop companions report a heartbeat with hostname, OS, configured roots, and last sync result.</p>
       <div id="devices-table"></div>
     </section>
 
-    <section class="view hidden" data-view="files">
-      <h2>Files</h2>
-      <p class="muted">Synced save files with version history per file.</p>
-      <div id="files-table"></div>
+    <section class="view hidden" data-view="emulators">
+      <h2>Emulators</h2>
+      <p class="muted">Push the latest upstream emulator bundle to a single user, an OS, or everyone you administer. Drill into a user to see Linux and Windows tiles with per-emulator update buttons.</p>
+      <div id="emulators-toolbar" class="row"></div>
+      <div id="emulators-tree"></div>
     </section>
 
-    <section class="view hidden admin-only" data-view="users">
-      <h2>Users &amp; invites</h2>
+    <section class="view hidden" data-view="saves">
+      <h2>Game Saves</h2>
+      <p class="muted">Browse the synced save tree as user → emulator → game folder → file. Download a single file or zip a whole game folder. Standard users see only their own saves; group admins see every member of the groups they administer; global admins see every user.</p>
+      <div id="saves-breadcrumb" class="row"></div>
+      <div id="saves-listing"></div>
+    </section>
+
+    <section class="view hidden admin-or-group-admin" data-view="users">
+      <h2>Users &amp; groups</h2>
       <form id="invite-form" class="form inline">
         <label>Invite email<input name="email" type="email" required></label>
+        <label class="group-admin-only">Into group<select name="group_id" id="invite-group-id"><option value="">— global —</option></select></label>
         <button type="submit">Create invite</button>
         <p id="invite-result" class="result"></p>
       </form>
       <div id="users-table"></div>
       <div id="invites-list"></div>
+      <div class="card mt admin-only">
+        <h3>Groups</h3>
+        <p class="muted">Groups let a non-global admin (e.g. a parent) administer their own slice of users. Each group can have multiple admins, and a user can belong to multiple groups.</p>
+        <form id="group-create-form" class="form inline">
+          <label>Group id<input name="id" pattern="[A-Za-z0-9_-]{1,64}" required></label>
+          <label>Display name<input name="name" maxlength="128" required></label>
+          <button type="submit">Create group</button>
+          <p id="group-create-result" class="result"></p>
+        </form>
+        <div id="groups-list"></div>
+      </div>
+    </section>
+
+    <section class="view hidden" data-view="account">
+      <h2>My account</h2>
+      <p class="muted">Mint long-lived API tokens for the desktop client. The raw token is shown only at creation — copy it immediately. Revoke any token to log out the desktop client that uses it.</p>
+      <form id="account-token-form" class="form inline">
+        <label>Token label<input name="label" maxlength="64" placeholder="e.g. Steam Deck" required></label>
+        <button type="submit">Create desktop token</button>
+        <p id="account-token-result" class="result"></p>
+      </form>
+      <div id="account-tokens-list"></div>
     </section>
 
     <section class="view hidden admin-only" data-view="logs">
@@ -2698,6 +2732,17 @@ table.data th { color: var(--muted); font-weight: 700; }
 .dot-error { background: var(--error); }
 code { background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 6px; font-size: .85em; }
 body:not(.is-admin) .admin-only { display: none !important; }
+body:not(.is-admin):not(.is-group-admin) .admin-or-group-admin { display: none !important; }
+body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !important; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row > * { margin: 0; }
+.tile { border: 1px solid var(--border); border-radius: 16px; padding: 14px; background: rgba(255,255,255,.04); }
+.tile h4 { margin: 0 0 8px 0; }
+.tile-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.crumb { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.05); border: 1px solid var(--border); color: var(--muted); margin-right: 6px; cursor: pointer; }
+.crumb.current { color: var(--text); background: rgba(255,122,26,.18); cursor: default; }
+.tokens-row { font-family: ui-monospace, SFMono-Regular, monospace; }
+.token-raw { padding: 8px; background: rgba(34,211,238,.10); border: 1px dashed var(--brand-2); border-radius: 8px; word-break: break-all; }
 .card-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 .card-pair .card { padding: 18px; }
 .toggle { display: flex; align-items: center; gap: 10px; }
@@ -3543,7 +3588,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             ))
         }
         (Method::Get, "/api/devices") => {
-            let Some(_user) = require_user(&state, &request)? else {
+            let Some(actor) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
                     json!({"error": "missing or invalid bearer token"}),
@@ -3551,10 +3596,22 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             };
             let store = state.store.lock().unwrap();
             let data = store.read()?;
+            // Heartbeats can include hostnames, OS versions, and configured
+            // ROM/emulator paths — treat them as private to the device's
+            // owner. Global admins see every device; group admins see
+            // every device owned by a member of any group they
+            // administer; standard users see only their own.
+            let visible = visible_user_emails(&data, &actor);
             let devices = data["devices"]
                 .as_object()
                 .into_iter()
                 .flat_map(|map| map.values().cloned())
+                .filter(|device| {
+                    device["email"]
+                        .as_str()
+                        .map(|email| visible.iter().any(|v| v == email))
+                        .unwrap_or(false)
+                })
                 .collect::<Vec<_>>();
             Ok(json_response(200, json!({"devices": devices})))
         }
@@ -3619,8 +3676,13 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     json!({"error": "missing or invalid bearer token"}),
                 ));
             };
-            if !user["is_admin"].as_bool().unwrap_or(false) {
-                return Ok(json_response(403, json!({"error": "admin required"})));
+            // Account disable is a destructive global action: it kicks
+            // every active session, revokes every API token, and bars
+            // future logins. Restrict it to global admins. Group admins
+            // can still administer their group via the group endpoints
+            // but cannot terminate accounts.
+            if !is_global_admin(&user) {
+                return Ok(json_response(403, json!({"error": "global admin required"})));
             }
             let target = urlencoding::decode(
                 path.trim_start_matches("/api/users/")
@@ -3631,10 +3693,41 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             if target.is_empty() {
                 return Ok(json_response(400, json!({"error": "email required"})));
             }
+            // Prevent the global admin from disabling themselves and
+            // prevent disabling the last remaining global admin (which
+            // would lock the entire deployment out).
+            let actor_email = user["email"].as_str().unwrap_or("").to_lowercase();
+            if target == actor_email {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "you cannot disable your own account"}),
+                ));
+            }
             let store = state.store.lock().unwrap();
             let mut data = store.read()?;
             if data["users"].get(&target).is_none() {
                 return Ok(json_response(404, json!({"error": "user not found"})));
+            }
+            let target_is_admin = data["users"][&target]["is_admin"]
+                .as_bool()
+                .unwrap_or(false);
+            if target_is_admin {
+                let remaining = data["users"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|map| map.iter())
+                    .filter(|(email, info)| {
+                        email.as_str() != target
+                            && !info["disabled"].as_bool().unwrap_or(false)
+                            && info["is_admin"].as_bool().unwrap_or(false)
+                    })
+                    .count();
+                if remaining == 0 {
+                    return Ok(json_response(
+                        400,
+                        json!({"error": "cannot disable the last global admin"}),
+                    ));
+                }
             }
             data["users"][&target]["disabled"] = json!(true);
             if let Some(sessions) = data["sessions"].as_object_mut() {
@@ -3909,13 +4002,25 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             )?
             .into_owned()
             .to_lowercase();
+            // Minting a desktop API token grants bearer authentication AS
+            // the target user. Allowing an admin to mint a token for
+            // somebody else would be a one-click impersonation primitive
+            // — even global admins are restricted from doing this. Each
+            // user must mint their own token via `POST /api/tokens`. The
+            // GET / DELETE variants below are still useful to admins for
+            // visibility and revocation because they cannot be used to
+            // impersonate.
+            let actor_email = actor["email"].as_str().unwrap_or("").to_lowercase();
+            if target != actor_email {
+                return Ok(json_response(
+                    403,
+                    json!({"error": "tokens can only be minted by their owner; ask the user to create one under My account"}),
+                ));
+            }
             let body = read_body(&mut request)?;
             let label = body["label"].as_str().unwrap_or("Desktop client");
             let store = state.store.lock().unwrap();
             let mut data = store.read()?;
-            if !can_admin_user(&data, &actor, &target) {
-                return Ok(json_response(403, json!({"error": "not allowed"})));
-            }
             if data["users"].get(&target).is_none() {
                 return Ok(json_response(404, json!({"error": "user not found"})));
             }
