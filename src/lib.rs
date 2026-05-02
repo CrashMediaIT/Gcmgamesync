@@ -2755,6 +2755,22 @@ fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>>
     response(status, payload, "application/json")
 }
 
+/// JSON response that also instructs intermediate proxies / browsers
+/// not to cache the payload. Use for any response that contains a
+/// short-lived or one-time secret (raw API tokens, session tokens,
+/// invite tokens, OTP secrets, QR codes, etc.) so a transparent caching
+/// layer or a logged HTTP archive cannot replay it later.
+fn json_response_no_store(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut resp = json_response(status, body);
+    if let Ok(header) = Header::from_bytes("Cache-Control", "no-store") {
+        resp.add_header(header);
+    }
+    if let Ok(header) = Header::from_bytes("Pragma", "no-cache") {
+        resp.add_header(header);
+    }
+    resp
+}
+
 fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut response = Response::from_data(body).with_status_code(StatusCode(status));
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
@@ -3251,7 +3267,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let otpauth = otpauth_uri(&email, &secret);
             let otpauth_qr = otpauth_qr_png(&otpauth);
             store.write(&data)?;
-            Ok(json_response(
+            Ok(json_response_no_store(
                 201,
                 json!({
                     "ok": true,
@@ -3381,7 +3397,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             };
             data["invites"][&token] = invite;
             store.write(&data)?;
-            Ok(json_response(
+            Ok(json_response_no_store(
                 201,
                 json!({
                     "email": email,
@@ -3436,7 +3452,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             store.write(&data)?;
             let otpauth = otpauth_uri(&email, &secret);
             let otpauth_qr = otpauth_qr_png(&otpauth);
-            Ok(json_response(
+            Ok(json_response_no_store(
                 201,
                 json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr, "group_id": invite_group_id}),
             ))
@@ -3481,7 +3497,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let token = new_token();
             data["sessions"][&token] = json!({"email": email});
             store.write(&data)?;
-            Ok(json_response(
+            Ok(json_response_no_store(
                 200,
                 json!({"token": token, "is_admin": user.unwrap()["is_admin"].as_bool().unwrap_or(false)}),
             ))
@@ -3938,7 +3954,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let email = user["email"].as_str().unwrap_or("").to_owned();
             let (raw, id, entry) = mint_api_token(&mut data, &email, label);
             store.write(&data)?;
-            Ok(json_response(
+            Ok(json_response_no_store(
                 201,
                 json!({"token": raw, "id": id, "entry": entry}),
             ))
@@ -4026,7 +4042,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             }
             let (raw, id, entry) = mint_api_token(&mut data, &target, label);
             store.write(&data)?;
-            Ok(json_response(
+            Ok(json_response_no_store(
                 201,
                 json!({"token": raw, "id": id, "entry": entry}),
             ))
@@ -4153,7 +4169,17 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             store.write(&data)?;
             Ok(json_response(201, data["groups"][&id].clone()))
         }
-        (Method::Delete, path) if path.starts_with("/api/groups/") && !path.contains("/members") && !path.contains("/admins") => {
+        // DELETE /api/groups/{id} — match exactly one path segment after
+        // "/api/groups/" so a group id that *contains* "members" or
+        // "admins" still routes here (and so the more specific
+        // member/admin sub-routes above stay distinct). The previous
+        // `!path.contains(...)` guard was a fragile substring filter.
+        (Method::Delete, path)
+            if path.starts_with("/api/groups/")
+                && !path["/api/groups/".len()..]
+                    .trim_end_matches('/')
+                    .contains('/') =>
+        {
             let Some(actor) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
