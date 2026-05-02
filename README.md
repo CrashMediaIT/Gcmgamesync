@@ -104,7 +104,9 @@ The desktop GUI reaches the server using the URL you enter during the first-run 
 
 ### 3. Invite users
 
-In the Web UI, open **Users / Invites** → *Create invite*. Send the invite token to the user. They paste it into the desktop GUI's first-run wizard (or `cargo run -- register --invite <token>` for headless installs), set a password, and complete TOTP enrollment.
+In the Web UI, open **Users & groups** → *Create invite*. Send the invite token to the user. They paste it into the desktop GUI's first-run wizard (or `cargo run -- register --invite <token>` for headless installs), set a password, and complete TOTP enrollment.
+
+Group admins (a non-global admin who administers a group) can also create invites, but only for their own group; the registrant is automatically added to that group.
 
 ### 4. Install the desktop GUI
 
@@ -124,13 +126,21 @@ Launch the GUI and the first-run wizard walks you through:
 6. **Install Steam ROM Manager + generate parsers** (checkboxes).
 7. **Enable autostart**.
 
-### 5. Push emulator updates to all users (admin)
+The headless daemon authenticates against the server with a long-lived **desktop API token**. The first-run admin sees a freshly-minted token on the setup completion screen; every other user (and the admin too, after the first run) can mint, copy, and revoke their own tokens under **My account** in the Web UI. Tokens replace the old "extract a session cookie" workflow.
 
-In the Web UI, open **Emulators (admin)** and click **Update all emulators**. The server fetches the current versions for every emulator (DuckStation, PCSX2 nightly, RPCS3 nightly, Xenia Canary, xemu, Cemu, RetroArch, Eden nightly, Dolphin dev) and shows you which have a new version. Tick the ones you want to publish, click **Apply**, and every desktop picks up the new bundle on its next sync. Device-local config files are never touched.
+### 5. Push emulator updates (admin / group admin)
 
-### 6. Restore a save (Web UI)
+In the Web UI, open **Emulators**. The page shows the users you administer, each expandable into Linux and Windows tiles with a row per emulator. You can:
 
-**Files** view → click **Versions** next to any synced save → click **Restore** next to the version you want. The current live file is snapshotted as a new version first, then the chosen historical content becomes the new live file. No newer versions are deleted — the revert can itself be reverted.
+- Click **Update all emulators (all users)** at the top to fan out every emulator to every user in your scope.
+- Click **All Windows** / **All Linux** for an OS-only fan-out.
+- Expand a user and update everything for that user, or just one OS, or one specific emulator.
+
+Group admins see only the users in groups they administer (typical "family / friends" setup). Standard users see only themselves and can re-publish bundles for their own desktop installs. Device-local config files (controllers, GPU backend, RPCS3 `config.yml`, Cemu `settings.xml`) are never touched.
+
+### 6. Browse & restore saves (Web UI)
+
+**Game Saves** view → pick a user → drill into emulator → game folder → file. Each file has a **Download** action; each folder has a **Download as zip** action (capped at 256 MiB). Standard users see only their own saves; group admins see every member of every group they administer; global admins see every user.
 
 ## SMTP — Office365 / Microsoft 365 OAuth2 setup
 

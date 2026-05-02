@@ -99,10 +99,14 @@
         return loadDashboard();
       case "devices":
         return loadDevices();
-      case "files":
-        return loadFiles();
+      case "emulators":
+        return loadEmulators();
+      case "saves":
+        return loadSaves();
       case "users":
         return loadUsers();
+      case "account":
+        return loadAccount();
       case "logs":
         return loadLogs();
       case "settings":
@@ -304,17 +308,44 @@
   async function loadUsers() {
     const users = await api("/api/users");
     const invites = await api("/api/invites");
+    const groups = await api("/api/groups");
     const el = $("#users-table");
     if (!users.ok) {
-      el.innerHTML = "<p class=\"muted\">" + escapeHtml(users.body.error || "Admin required.") + "</p>";
+      el.innerHTML = "<p class=\"muted\">" + escapeHtml(users.body.error || "Not allowed.") + "</p>";
       return;
     }
     const userList = users.body.users || [];
+    const groupList = (groups.ok && groups.body.groups) || [];
+    // Index members → groups so each user row can show the groups they
+    // belong to. Group admins are shown with a star.
+    const groupsByMember = {};
+    groupList.forEach((g) => {
+      (g.members || []).forEach((m) => {
+        if (!groupsByMember[m]) groupsByMember[m] = [];
+        const isAdminOfGroup = (g.admins || []).indexOf(m) >= 0;
+        groupsByMember[m].push((isAdminOfGroup ? "★ " : "") + g.name + " (" + g.id + ")");
+      });
+    });
     el.innerHTML =
-      "<table class=\"data\"><thead><tr><th>Email</th><th>Admin</th><th>Disabled</th><th>Action</th></tr></thead><tbody>" +
+      "<table class=\"data\"><thead><tr><th>Email</th><th>Global admin</th><th>Disabled</th><th>Groups</th><th>Action</th></tr></thead><tbody>" +
       userList
-        .map(
-          (u) =>
+        .map((u) => {
+          const groups = groupsByMember[u.email] || [];
+          const isMe = state.me && state.me.email === u.email;
+          const canDisable = state.isAdmin && !u.disabled && !isMe;
+          const canPromote = state.isAdmin && !u.is_admin;
+          const canDemote = state.isAdmin && u.is_admin && !isMe;
+          let actions = "";
+          if (canDisable) {
+            actions += '<button class="secondary" data-disable="' + escapeHtml(u.email) + '">Disable</button> ';
+          }
+          if (canPromote) {
+            actions += '<button class="secondary" data-promote="' + escapeHtml(u.email) + '">Promote</button> ';
+          }
+          if (canDemote) {
+            actions += '<button class="secondary" data-demote="' + escapeHtml(u.email) + '">Demote</button>';
+          }
+          return (
             "<tr><td>" +
             escapeHtml(u.email) +
             "</td><td>" +
@@ -322,11 +353,12 @@
             "</td><td>" +
             (u.disabled ? "yes" : "no") +
             "</td><td>" +
-            (u.disabled
-              ? ""
-              : '<button class="secondary" data-disable="' + escapeHtml(u.email) + '">Disable</button>') +
+            escapeHtml(groups.join(", ") || "—") +
+            "</td><td>" +
+            actions +
             "</td></tr>"
-        )
+          );
+        })
         .join("") +
       "</tbody></table>";
     $$("button[data-disable]").forEach((btn) =>
@@ -334,6 +366,24 @@
         const email = btn.getAttribute("data-disable");
         if (!confirm("Disable " + email + "?")) return;
         const result = await api("/api/users/" + encodeURIComponent(email) + "/disable", { method: "POST" });
+        if (result.ok) loadUsers();
+        else alert(result.body.error || "Failed");
+      })
+    );
+    $$("button[data-promote]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const email = btn.getAttribute("data-promote");
+        if (!confirm("Make " + email + " a global admin?")) return;
+        const result = await api("/api/admin/users/" + encodeURIComponent(email) + "/promote", { method: "POST" });
+        if (result.ok) loadUsers();
+        else alert(result.body.error || "Failed");
+      })
+    );
+    $$("button[data-demote]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const email = btn.getAttribute("data-demote");
+        if (!confirm("Remove global admin from " + email + "?")) return;
+        const result = await api("/api/admin/users/" + encodeURIComponent(email) + "/demote", { method: "POST" });
         if (result.ok) loadUsers();
         else alert(result.body.error || "Failed");
       })
@@ -356,6 +406,419 @@
           "</ul>"
         : "<p class=\"muted\">No outstanding invites.</p>";
     }
+    // Populate the invite "Into group" dropdown with the groups the
+    // current actor administers, plus the global option for global
+    // admins. A group admin is forced to pick one of their own groups.
+    const inviteGroupSel = $("#invite-group-id");
+    if (inviteGroupSel) {
+      const adminGroups = groupList.filter(
+        (g) => state.isAdmin || (g.admins || []).indexOf(state.me && state.me.email) >= 0
+      );
+      const opts = (state.isAdmin ? '<option value="">— global —</option>' : "") +
+        adminGroups
+          .map((g) => '<option value="' + escapeHtml(g.id) + '">' + escapeHtml(g.name) + "</option>")
+          .join("");
+      inviteGroupSel.innerHTML = opts || '<option value="">(no groups)</option>';
+    }
+    // Render the Groups admin sub-panel (global admins only — the card
+    // itself is hidden by .admin-only when the body lacks .is-admin, but
+    // we still gate the data fetch defensively).
+    if (state.isAdmin) {
+      renderGroupsList(groupList);
+    }
+  }
+
+  function renderGroupsList(groups) {
+    const el = $("#groups-list");
+    if (!el) return;
+    if (!groups.length) {
+      el.innerHTML = '<p class="muted">No groups yet. Create one above.</p>';
+      return;
+    }
+    el.innerHTML = groups
+      .map(
+        (g) =>
+          '<div class="tile"><h4>' +
+          escapeHtml(g.name) +
+          ' <small class="muted">(' +
+          escapeHtml(g.id) +
+          ")</small></h4>" +
+          '<p class="muted">Admins: ' +
+          escapeHtml((g.admins || []).join(", ") || "—") +
+          "<br>Members: " +
+          escapeHtml((g.members || []).join(", ") || "—") +
+          "</p>" +
+          '<form class="form inline" data-group-add-member="' +
+          escapeHtml(g.id) +
+          '"><label>Add member<input name="email" type="email" required></label><button type="submit" class="secondary">Add</button></form>' +
+          '<form class="form inline" data-group-add-admin="' +
+          escapeHtml(g.id) +
+          '"><label>Promote member to admin<input name="email" type="email" required></label><button type="submit" class="secondary">Promote</button></form>' +
+          '<button class="secondary" data-group-delete="' +
+          escapeHtml(g.id) +
+          '">Delete group</button></div>'
+      )
+      .join("");
+    $$("form[data-group-add-member]").forEach((form) =>
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const id = form.getAttribute("data-group-add-member");
+        const email = form.email.value.trim().toLowerCase();
+        const r = await api("/api/groups/" + encodeURIComponent(id) + "/members", {
+          method: "POST",
+          body: { email },
+        });
+        if (r.ok) loadUsers();
+        else alert(r.body.error || "Failed");
+      })
+    );
+    $$("form[data-group-add-admin]").forEach((form) =>
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const id = form.getAttribute("data-group-add-admin");
+        const email = form.email.value.trim().toLowerCase();
+        const r = await api(
+          "/api/groups/" + encodeURIComponent(id) + "/admins/" + encodeURIComponent(email),
+          { method: "POST" }
+        );
+        if (r.ok) loadUsers();
+        else alert(r.body.error || "Failed");
+      })
+    );
+    $$("button[data-group-delete]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-group-delete");
+        if (!confirm("Delete group " + id + "?")) return;
+        const r = await api("/api/groups/" + encodeURIComponent(id), { method: "DELETE" });
+        if (r.ok) loadUsers();
+        else alert(r.body.error || "Failed");
+      })
+    );
+  }
+
+  // ---------- Emulators tab ----------
+  async function loadEmulators() {
+    const r = await api("/api/emulators/scoped");
+    const tree = $("#emulators-tree");
+    const toolbar = $("#emulators-toolbar");
+    if (!r.ok) {
+      tree.innerHTML = '<p class="muted">' + escapeHtml(r.body.error || "Failed.") + "</p>";
+      toolbar.innerHTML = "";
+      return;
+    }
+    const users = r.body.users || [];
+    const emulators = r.body.emulators || [];
+    // Top-level fan-out actions. A standard user only sees themselves so
+    // the "all users" button quietly maps to themselves anyway.
+    toolbar.innerHTML =
+      '<button data-update-scope="all-all">Update all emulators (all users)</button>' +
+      '<button class="secondary" data-update-scope="all-windows">Update all Windows</button>' +
+      '<button class="secondary" data-update-scope="all-linux">Update all Linux</button>';
+    $$("#emulators-toolbar button[data-update-scope]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const scope = btn.getAttribute("data-update-scope");
+        const os = scope.endsWith("windows") ? "windows" : scope.endsWith("linux") ? "linux" : "all";
+        runEmulatorUpdate(btn, { os });
+      })
+    );
+    if (!users.length) {
+      tree.innerHTML = '<p class="muted">No users in your administrable scope yet.</p>';
+      return;
+    }
+    tree.innerHTML = users
+      .map((u, idx) => {
+        const targets = u.targets || {};
+        return (
+          '<details class="tile" ' +
+          (users.length === 1 ? "open" : "") +
+          '><summary><strong>' +
+          escapeHtml(u.email) +
+          "</strong></summary>" +
+          '<div class="row mt">' +
+          '<button data-update-user="' +
+          escapeHtml(u.email) +
+          '" data-os="all">Update all emulators for this user</button>' +
+          '<button class="secondary" data-update-user="' +
+          escapeHtml(u.email) +
+          '" data-os="windows">All Windows</button>' +
+          '<button class="secondary" data-update-user="' +
+          escapeHtml(u.email) +
+          '" data-os="linux">All Linux</button>' +
+          "</div>" +
+          '<div class="tile-grid mt">' +
+          ["windows", "linux"]
+            .map((os) => {
+              return (
+                '<div class="tile"><h4>' +
+                escapeHtml(os) +
+                "</h4>" +
+                emulators
+                  .map((emu) => {
+                    const t = (targets[emu.id] && targets[emu.id][os]) || null;
+                    return (
+                      "<div>" +
+                      escapeHtml(emu.name) +
+                      ' <small class="muted">' +
+                      (t ? "v" + escapeHtml(t.version) + " — " + timeAgo(t.applied_at) : "never updated") +
+                      "</small> " +
+                      '<button class="secondary" data-update-one="' +
+                      escapeHtml(u.email) +
+                      '" data-emu="' +
+                      escapeHtml(emu.id) +
+                      '" data-os="' +
+                      escapeHtml(os) +
+                      '">Update</button></div>'
+                    );
+                  })
+                  .join("") +
+                "</div>"
+              );
+            })
+            .join("") +
+          "</div></details>"
+        );
+      })
+      .join("");
+    $$("#emulators-tree button[data-update-user]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        runEmulatorUpdate(btn, {
+          users: [btn.getAttribute("data-update-user")],
+          os: btn.getAttribute("data-os"),
+        });
+      })
+    );
+    $$("#emulators-tree button[data-update-one]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        runEmulatorUpdate(btn, {
+          users: [btn.getAttribute("data-update-one")],
+          os: btn.getAttribute("data-os"),
+          emulator_ids: [btn.getAttribute("data-emu")],
+        });
+      })
+    );
+  }
+
+  async function runEmulatorUpdate(button, scope) {
+    if (!confirm("Publish the latest upstream bundle for: " + JSON.stringify(scope) + "?")) return;
+    button.disabled = true;
+    const original = button.textContent;
+    button.textContent = "Updating...";
+    const r = await api("/api/emulators/update", { method: "POST", body: scope });
+    button.disabled = false;
+    button.textContent = original;
+    if (!r.ok) {
+      alert(r.body.error || "Update failed.");
+      return;
+    }
+    const errs = (r.body.errors || []).map((e) => (e.emulator_id || "") + " " + (e.os || "") + ": " + e.error).join("\n");
+    alert(
+      "Published " +
+        (r.body.published || []).length +
+        " bundle(s) for " +
+        ((r.body.users || []).length) +
+        " user(s)." +
+        (errs ? "\nErrors:\n" + errs : "")
+    );
+    loadEmulators();
+  }
+
+  // ---------- Game Saves tab ----------
+  async function loadSaves() {
+    const crumb = $("#saves-breadcrumb");
+    const list = $("#saves-listing");
+    // Path state lives on `state.savesOwner` (selected user) and
+    // `state.savesPath` (relative path under that user). Empty owner =>
+    // top-level user picker.
+    const owner = state.savesOwner || "";
+    const path = state.savesPath || "";
+    if (!owner) {
+      crumb.innerHTML = '<span class="crumb current">Users</span>';
+      const r = await api("/api/saves/users");
+      if (!r.ok) {
+        list.innerHTML = '<p class="muted">' + escapeHtml(r.body.error || "Failed.") + "</p>";
+        return;
+      }
+      const users = r.body.users || [];
+      if (!users.length) {
+        list.innerHTML = '<p class="muted">No users in your administrable scope yet.</p>';
+        return;
+      }
+      list.innerHTML =
+        '<div class="tile-grid">' +
+        users
+          .map(
+            (u) =>
+              '<div class="tile" data-pick-owner="' +
+              escapeHtml(u.email) +
+              '" style="cursor:pointer"><h4>' +
+              escapeHtml(u.email) +
+              "</h4><p class=\"muted\">" +
+              escapeHtml(u.emulator_count) +
+              " emulator folder(s)</p></div>"
+          )
+          .join("") +
+        "</div>";
+      $$("#saves-listing div[data-pick-owner]").forEach((tile) =>
+        tile.addEventListener("click", () => {
+          state.savesOwner = tile.getAttribute("data-pick-owner");
+          state.savesPath = "";
+          loadSaves();
+        })
+      );
+      return;
+    }
+    // Inside an owner: render breadcrumb + directory listing.
+    const segments = path ? path.split("/").filter(Boolean) : [];
+    let crumbHtml =
+      '<span class="crumb" data-crumb="">Users</span>' +
+      '<span class="crumb" data-crumb-owner="">' +
+      escapeHtml(owner) +
+      "</span>";
+    let acc = "";
+    segments.forEach((seg, i) => {
+      acc = acc ? acc + "/" + seg : seg;
+      const isLast = i === segments.length - 1;
+      crumbHtml +=
+        '<span class="crumb' +
+        (isLast ? " current" : "") +
+        '" data-crumb-path="' +
+        escapeHtml(acc) +
+        '">' +
+        escapeHtml(seg) +
+        "</span>";
+    });
+    crumb.innerHTML = crumbHtml;
+    $$("#saves-breadcrumb span[data-crumb]").forEach((c) =>
+      c.addEventListener("click", () => {
+        state.savesOwner = "";
+        state.savesPath = "";
+        loadSaves();
+      })
+    );
+    $$("#saves-breadcrumb span[data-crumb-owner]").forEach((c) =>
+      c.addEventListener("click", () => {
+        state.savesPath = "";
+        loadSaves();
+      })
+    );
+    $$("#saves-breadcrumb span[data-crumb-path]").forEach((c) =>
+      c.addEventListener("click", () => {
+        const p = c.getAttribute("data-crumb-path");
+        if (state.savesPath !== p) {
+          state.savesPath = p;
+          loadSaves();
+        }
+      })
+    );
+    const r = await api(
+      "/api/saves/list/" + encodeURIComponent(owner) + (path ? "?path=" + encodeURIComponent(path) : "")
+    );
+    if (!r.ok) {
+      list.innerHTML = '<p class="muted">' + escapeHtml(r.body.error || "Failed.") + "</p>";
+      return;
+    }
+    const dirs = r.body.directories || [];
+    const files = r.body.files || [];
+    let html = "";
+    if (path) {
+      const zipUrl = "/api/saves/zip/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(path);
+      html +=
+        '<p><a href="' +
+        zipUrl +
+        '" download class="secondary" style="display:inline-block;padding:8px 12px;border-radius:10px;border:1px solid var(--border)">Download this folder as zip</a></p>';
+    }
+    if (!dirs.length && !files.length) {
+      html += '<p class="muted">Empty.</p>';
+      list.innerHTML = html;
+      return;
+    }
+    html +=
+      '<table class="data"><thead><tr><th>Name</th><th>Size</th><th>Items</th><th>Modified</th><th>Action</th></tr></thead><tbody>' +
+      dirs
+        .map((d) => {
+          const sub = path ? path + "/" + d.name : d.name;
+          return (
+            '<tr><td>📁 <a href="#" data-sub="' +
+            escapeHtml(sub) +
+            '">' +
+            escapeHtml(d.name) +
+            "</a></td><td>" +
+            escapeHtml(bytes(d.size)) +
+            "</td><td>" +
+            escapeHtml(d.file_count) +
+            "</td><td>" +
+            escapeHtml(timeAgo(d.modified)) +
+            "</td><td>—</td></tr>"
+          );
+        })
+        .join("") +
+      files
+        .map((f) => {
+          const sub = path ? path + "/" + f.name : f.name;
+          const url = "/api/saves/file/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(sub);
+          return (
+            "<tr><td>📄 " +
+            escapeHtml(f.name) +
+            "</td><td>" +
+            escapeHtml(bytes(f.size)) +
+            "</td><td>1</td><td>" +
+            escapeHtml(timeAgo(f.modified)) +
+            '</td><td><a href="' +
+            url +
+            '" download>Download</a></td></tr>'
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+    list.innerHTML = html;
+    $$("#saves-listing a[data-sub]").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        state.savesPath = a.getAttribute("data-sub");
+        loadSaves();
+      })
+    );
+  }
+
+  // ---------- My account tab ----------
+  async function loadAccount() {
+    const r = await api("/api/tokens");
+    const el = $("#account-tokens-list");
+    if (!r.ok) {
+      el.innerHTML = '<p class="muted">' + escapeHtml(r.body.error || "Failed.") + "</p>";
+      return;
+    }
+    const list = r.body.tokens || [];
+    if (!list.length) {
+      el.innerHTML = '<p class="muted">No tokens yet. Mint one above to authenticate the desktop client.</p>';
+      return;
+    }
+    el.innerHTML =
+      '<table class="data tokens-row"><thead><tr><th>Label</th><th>Created</th><th>Last used</th><th>Action</th></tr></thead><tbody>' +
+      list
+        .map(
+          (t) =>
+            "<tr><td>" +
+            escapeHtml(t.label) +
+            "</td><td>" +
+            escapeHtml(timeAgo(t.created_at)) +
+            "</td><td>" +
+            escapeHtml(t.last_used_at ? timeAgo(t.last_used_at) : "never") +
+            '</td><td><button class="secondary" data-revoke="' +
+            escapeHtml(t.id) +
+            '">Revoke</button></td></tr>'
+        )
+        .join("") +
+      "</tbody></table>";
+    $$("#account-tokens-list button[data-revoke]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-revoke");
+        if (!confirm("Revoke this desktop token? Any client using it will be signed out on its next request.")) return;
+        const result = await api("/api/tokens/" + encodeURIComponent(id), { method: "DELETE" });
+        if (result.ok) loadAccount();
+        else alert(result.body.error || "Failed");
+      })
+    );
   }
 
   async function loadLogs() {
@@ -519,10 +982,16 @@
     }
     state.me = me.body;
     state.isAdmin = !!me.body.is_admin;
+    state.isGroupAdmin = !!me.body.is_group_admin;
     localStorage.setItem(ADMIN_KEY, state.isAdmin ? "1" : "0");
     $("#me-email").textContent = me.body.email || "";
-    $("#me-role").textContent = state.isAdmin ? "admin" : "user";
+    $("#me-role").textContent = state.isAdmin
+      ? "global admin"
+      : state.isGroupAdmin
+      ? "group admin"
+      : "user";
     document.body.classList.toggle("is-admin", state.isAdmin);
+    document.body.classList.toggle("is-group-admin", state.isGroupAdmin);
     return true;
   }
 
@@ -597,6 +1066,17 @@
           if (cont) {
             cont.classList.remove("hidden");
           }
+          // Surface the freshly-minted desktop API token. The first-run
+          // admin needs this to wire up the desktop client; without it
+          // there was no UI to obtain a token at all.
+          if (result.body.desktop_token) {
+            const tokenPanel = document.getElementById("setup-token");
+            const tokenValue = document.getElementById("setup-token-value");
+            if (tokenPanel && tokenValue) {
+              tokenValue.textContent = result.body.desktop_token;
+              tokenPanel.classList.remove("hidden");
+            }
+          }
           state.setupComplete = true;
           // Do not auto-redirect: the admin needs time to scan the QR code
           // with their authenticator app before the setup view is replaced
@@ -657,12 +1137,52 @@
       inviteForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const data = Object.fromEntries(new FormData(inviteForm));
+        // The form's "group_id" is "" for a global invite (global admins
+        // only) — omit it from the payload so the server treats the
+        // invite as ungrouped.
+        if (!data.group_id) delete data.group_id;
         const result = await api("/api/invites", { method: "POST", body: data });
         if (result.ok) {
           setMessage("invite-result", "Invite token: " + result.body.invite_token, "good");
           loadUsers();
         } else {
           setMessage("invite-result", result.body.error || "Failed", "error");
+        }
+      });
+    }
+
+    const accountTokenForm = $("#account-token-form");
+    if (accountTokenForm) {
+      accountTokenForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(accountTokenForm));
+        const result = await api("/api/tokens", { method: "POST", body: data });
+        if (result.ok) {
+          setMessage(
+            "account-token-result",
+            "Token (copy it now — you cannot see it again): " + result.body.token,
+            "good"
+          );
+          accountTokenForm.reset();
+          loadAccount();
+        } else {
+          setMessage("account-token-result", result.body.error || "Failed", "error");
+        }
+      });
+    }
+
+    const groupCreateForm = $("#group-create-form");
+    if (groupCreateForm) {
+      groupCreateForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(groupCreateForm));
+        const result = await api("/api/groups", { method: "POST", body: data });
+        if (result.ok) {
+          setMessage("group-create-result", "Group " + result.body.id + " created.", "good");
+          groupCreateForm.reset();
+          loadUsers();
+        } else {
+          setMessage("group-create-result", result.body.error || "Failed", "error");
         }
       });
     }
