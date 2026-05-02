@@ -1697,6 +1697,220 @@ fn new_token() -> String {
     general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>())
 }
 
+/// Hash a raw API token for storage. We never persist the raw token — only
+/// this digest. Lookup is O(1) because `data["api_tokens"]` is keyed by the
+/// digest. SHA-256 is sufficient here: the input is a 32-byte CSPRNG-derived
+/// secret with ~256 bits of entropy, so brute force is infeasible regardless
+/// of any per-token salt.
+fn hash_api_token(raw: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+/// Mint a fresh API token, persist its digest under `data["api_tokens"]`, and
+/// return `(raw_token, token_id, public_metadata)`. The raw token is shown to
+/// the caller exactly once; subsequent reads only return `public_metadata`.
+fn mint_api_token(data: &mut Value, email: &str, label: &str) -> (String, String, Value) {
+    let raw = new_token();
+    let digest = hash_api_token(&raw);
+    let id = general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<8>());
+    let safe_label = label.trim();
+    let safe_label = if safe_label.is_empty() {
+        "Desktop client"
+    } else {
+        safe_label
+    };
+    let now = unix_time();
+    if !data["api_tokens"].is_object() {
+        data["api_tokens"] = json!({});
+    }
+    let entry = json!({
+        "id": id,
+        "email": email,
+        "label": safe_label,
+        "created_at": now,
+        "last_used_at": 0
+    });
+    data["api_tokens"][&digest] = entry.clone();
+    (raw, id, entry)
+}
+
+/// Resolve the email associated with a raw API token, if one exists. Updates
+/// the token's `last_used_at` so the UI can show stale tokens.
+fn api_token_owner(data: &mut Value, raw_token: &str) -> Option<String> {
+    let digest = hash_api_token(raw_token);
+    let entry = data["api_tokens"].get(&digest)?;
+    let email = entry["email"].as_str()?.to_owned();
+    let now = unix_time();
+    data["api_tokens"][&digest]["last_used_at"] = json!(now);
+    Some(email)
+}
+
+/// Snapshot the API tokens for a single user with the digest stripped out.
+fn list_api_tokens_for(data: &Value, email: &str) -> Vec<Value> {
+    let Some(map) = data["api_tokens"].as_object() else {
+        return Vec::new();
+    };
+    let mut entries: Vec<Value> = map
+        .values()
+        .filter(|entry| entry["email"].as_str() == Some(email))
+        .cloned()
+        .collect();
+    entries.sort_by_key(|entry| entry["created_at"].as_u64().unwrap_or(0));
+    entries
+}
+
+/// Remove the API token whose `id` matches, scoped to `email`. Returns
+/// `true` when a token was actually removed so callers can return 404 when
+/// it wasn't.
+fn revoke_api_token(data: &mut Value, email: &str, id: &str) -> bool {
+    let Some(map) = data["api_tokens"].as_object_mut() else {
+        return false;
+    };
+    let mut to_remove: Option<String> = None;
+    for (digest, entry) in map.iter() {
+        if entry["email"].as_str() == Some(email) && entry["id"].as_str() == Some(id) {
+            to_remove = Some(digest.clone());
+            break;
+        }
+    }
+    match to_remove {
+        Some(digest) => map.remove(&digest).is_some(),
+        None => false,
+    }
+}
+
+/// Drop every API token belonging to `email`. Used when an admin disables an
+/// account so a leaked desktop token can't keep talking to the server.
+fn revoke_all_api_tokens_for(data: &mut Value, email: &str) {
+    let Some(map) = data["api_tokens"].as_object_mut() else {
+        return;
+    };
+    let to_remove: Vec<String> = map
+        .iter()
+        .filter(|(_, entry)| entry["email"].as_str() == Some(email))
+        .map(|(digest, _)| digest.clone())
+        .collect();
+    for digest in to_remove {
+        map.remove(&digest);
+    }
+}
+
+/// True when `actor` is the global admin.
+fn is_global_admin(actor: &Value) -> bool {
+    actor["is_admin"].as_bool().unwrap_or(false)
+}
+
+/// True when `actor` is listed as an admin of `group_id`.
+fn is_group_admin(data: &Value, actor_email: &str, group_id: &str) -> bool {
+    let Some(group) = data["groups"].get(group_id) else {
+        return false;
+    };
+    group["admins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|email| email.as_str() == Some(actor_email))
+}
+
+/// Group ids in which `actor_email` is listed as an admin.
+fn admin_group_ids_for(data: &Value, actor_email: &str) -> Vec<String> {
+    data["groups"]
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .filter_map(|(id, group)| {
+            let admins = group["admins"].as_array()?;
+            if admins
+                .iter()
+                .any(|email| email.as_str() == Some(actor_email))
+            {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Group ids `email` is a member of.
+fn member_group_ids_for(data: &Value, email: &str) -> Vec<String> {
+    data["groups"]
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .filter_map(|(id, group)| {
+            let members = group["members"].as_array()?;
+            if members.iter().any(|m| m.as_str() == Some(email)) {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Authorization helper: can `actor` administer `target_email`?
+/// Global admins can administer everyone, group admins can administer any
+/// member of any group they admin, and every user is allowed to administer
+/// themselves (e.g. mint their own API tokens).
+fn can_admin_user(data: &Value, actor: &Value, target_email: &str) -> bool {
+    if is_global_admin(actor) {
+        return true;
+    }
+    let actor_email = actor["email"].as_str().unwrap_or("");
+    if actor_email == target_email {
+        return true;
+    }
+    let actor_groups = admin_group_ids_for(data, actor_email);
+    if actor_groups.is_empty() {
+        return false;
+    }
+    let target_groups = member_group_ids_for(data, target_email);
+    actor_groups.iter().any(|g| target_groups.contains(g))
+}
+
+/// Set of user emails `actor` is allowed to see, sorted ascending. Global
+/// admins see everyone; group admins see themselves plus every member of any
+/// group they admin; standard users see only themselves.
+fn visible_user_emails(data: &Value, actor: &Value) -> Vec<String> {
+    let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+    if is_global_admin(actor) {
+        let mut all: Vec<String> = data["users"]
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.keys().cloned())
+            .collect();
+        all.sort();
+        return all;
+    }
+    let mut emails: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if !actor_email.is_empty() {
+        emails.insert(actor_email.clone());
+    }
+    for group_id in admin_group_ids_for(data, &actor_email) {
+        if let Some(members) = data["groups"][&group_id]["members"].as_array() {
+            for member in members.iter().filter_map(Value::as_str) {
+                emails.insert(member.to_owned());
+            }
+        }
+    }
+    emails.into_iter().collect()
+}
+
+/// Validate a group id supplied by the client. Group ids double as JSON
+/// object keys and as URL path segments, so the alphabet is intentionally
+/// narrow.
+fn is_safe_group_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn unix_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2063,6 +2277,115 @@ struct AppState {
     store: Mutex<JsonStore>,
 }
 
+/// Resolve a user-supplied save path beneath `data_dir/files/{owner}` while
+/// rejecting anything that would escape the owner's tree (path traversal,
+/// absolute paths, drive prefixes). Returns the resolved absolute path.
+/// Empty / "." / "/" all resolve to the owner root.
+fn resolve_save_path(data_dir: &Path, owner: &str, raw: &str) -> AppResult<PathBuf> {
+    let owner_root = data_dir.join("files").join(owner);
+    let trimmed = raw.trim_matches('/').trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return Ok(owner_root);
+    }
+    let relative = safe_relative_path(trimmed)?;
+    Ok(owner_root.join(relative))
+}
+
+/// List the immediate children of a directory under a user's saves root,
+/// returning entries grouped into directories and files with their size and
+/// modification time.
+fn list_save_directory(path: &Path) -> AppResult<Value> {
+    if !path.exists() {
+        return Ok(json!({"directories": [], "files": []}));
+    }
+    if !path.is_dir() {
+        return Err("path is not a directory".into());
+    }
+    let mut directories: Vec<Value> = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if entry_path.is_dir() {
+            let mut file_count = 0_u64;
+            let mut total_bytes = 0_u64;
+            // Cheap recursive size for the leaf — bounded by the user's own
+            // saves volume so it's safe to compute on demand.
+            walk_count(&entry_path, &mut file_count, &mut total_bytes).ok();            directories.push(json!({
+                "name": name,
+                "modified": modified,
+                "file_count": file_count,
+                "size": total_bytes
+            }));
+        } else if entry_path.is_file() {
+            files.push(json!({
+                "name": name,
+                "size": metadata.len(),
+                "modified": modified
+            }));
+        }
+    }
+    directories.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(json!({"directories": directories, "files": files}))
+}
+
+/// Pack a directory subtree into an in-memory zip so the Game Saves UI can
+/// offer a single-click "download whole folder" action. Caps the resulting
+/// archive at `MAX_SAVES_ZIP_BYTES` so a malicious or accidentally giant
+/// folder cannot exhaust the server's memory.
+const MAX_SAVES_ZIP_BYTES: u64 = 256 * 1024 * 1024;
+
+fn zip_directory(root: &Path) -> AppResult<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut total: u64 = 0;
+        let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in fs::read_dir(&current)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(root)
+                    .map_err(|_| "path is not under root")?;
+                let name = rel.to_string_lossy().replace('\\', "/");
+                let bytes = fs::read(&path)?;
+                total = total.saturating_add(bytes.len() as u64);
+                if total > MAX_SAVES_ZIP_BYTES {
+                    return Err(format!(
+                        "folder is larger than the {} MiB download cap",
+                        MAX_SAVES_ZIP_BYTES / 1024 / 1024
+                    )
+                    .into());
+                }
+                zip.start_file(name, opts)?;
+                std::io::Write::write_all(&mut zip, &bytes)?;
+            }
+        }
+        zip.finish()?;
+    }
+    Ok(buf)
+}
+
 fn bootstrap_store(data_dir: &Path) -> AppResult<JsonStore> {
     let store = JsonStore::new(data_dir.join("state.json"))?;
     let mut data = store.read()?;
@@ -2082,6 +2405,8 @@ fn ensure_state_defaults(data: &mut Value) -> bool {
         "settings",
         "devices",
         "emulator_updates",
+        "api_tokens",
+        "groups",
     ] {
         if !data[key].is_object() {
             data[key] = json!({});
@@ -2427,10 +2752,20 @@ fn bearer_email(state: &AppState, request: &Request) -> AppResult<Option<String>
         return Ok(None);
     };
     let store = state.store.lock().unwrap();
-    let data = store.read()?;
-    Ok(data["sessions"][&token]["email"]
-        .as_str()
-        .map(str::to_owned))
+    let mut data = store.read()?;
+    // Web sessions take precedence: they are short-lived and tied to the
+    // browser. If the bearer is not a known session, fall back to the
+    // per-user persistent API token table used by the desktop client.
+    if let Some(email) = data["sessions"][&token]["email"].as_str() {
+        return Ok(Some(email.to_owned()));
+    }
+    if let Some(email) = api_token_owner(&mut data, &token) {
+        // Persist the touched `last_used_at` so the UI can show stale
+        // tokens. Best-effort: a write failure must not block authn.
+        let _ = store.write(&data);
+        return Ok(Some(email));
+    }
+    Ok(None)
 }
 
 fn require_user(state: &AppState, request: &Request) -> AppResult<Option<Value>> {
@@ -2864,12 +3199,24 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 "token_status": "authorization_pending"
             });
             data["setup_complete"] = json!(true);
+            // Mint a starter desktop API token so the brand-new admin can
+            // wire up the desktop client immediately. Without this, the
+            // first-run admin had no way to obtain an `auth_token`.
+            let (raw_token, token_id, _) = mint_api_token(&mut data, &email, "First-run admin token");
             let otpauth = otpauth_uri(&email, &secret);
             let otpauth_qr = otpauth_qr_png(&otpauth);
             store.write(&data)?;
             Ok(json_response(
                 201,
-                json!({"ok": true, "email": email, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr}),
+                json!({
+                    "ok": true,
+                    "email": email,
+                    "otpauth_uri": otpauth,
+                    "otpauth_qr_png": otpauth_qr,
+                    "desktop_token": raw_token,
+                    "desktop_token_id": token_id,
+                    "desktop_token_label": "First-run admin token"
+                }),
             ))
         }
         (Method::Get, "/api/users") => {
@@ -2885,21 +3232,24 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     json!({"error": "missing or invalid bearer token"}),
                 ));
             };
-            if !user["is_admin"].as_bool().unwrap_or(false) {
-                return Ok(json_response(403, json!({"error": "admin required"})));
-            }
             let store = state.store.lock().unwrap();
             let data = store.read()?;
+            // Global admins see every user; group admins see members of
+            // any group they administer (plus themselves); standard users
+            // see only their own row.
+            let visible = visible_user_emails(&data, &user);
             let users = data["users"]
                 .as_object()
                 .into_iter()
-                .flat_map(|users| users.values().cloned())
-                .map(|mut user| {
-                    if let Some(object) = user.as_object_mut() {
+                .flat_map(|users| users.iter())
+                .filter(|(email, _)| visible.contains(email))
+                .map(|(_, user)| {
+                    let mut value = user.clone();
+                    if let Some(object) = value.as_object_mut() {
                         object.remove("password_hash");
                         object.remove("totp_secret");
                     }
-                    user
+                    value
                 })
                 .collect::<Vec<_>>();
             Ok(json_response(200, json!({"users": users})))
@@ -2942,22 +3292,58 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     json!({"error": "missing or invalid bearer token"}),
                 ));
             };
-            if !user["is_admin"].as_bool().unwrap_or(false) {
-                return Ok(json_response(403, json!({"error": "admin required"})));
-            }
             let body = read_body(&mut request)?;
+            let group_id = body["group_id"]
+                .as_str()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty());
+            // Global admins can invite anyone. Group admins can invite
+            // people but only into a group they administer, and the new
+            // user is auto-added to that group on registration.
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let actor_email = user["email"].as_str().unwrap_or("").to_owned();
+            if !is_global_admin(&user) {
+                match &group_id {
+                    None => {
+                        return Ok(json_response(
+                            403,
+                            json!({"error": "group admins must specify group_id"}),
+                        ));
+                    }
+                    Some(id) if !is_group_admin(&data, &actor_email, id) => {
+                        return Ok(json_response(
+                            403,
+                            json!({"error": "you do not administer that group"}),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(id) = &group_id {
+                if !is_safe_group_id(id) || data["groups"].get(id).is_none() {
+                    return Ok(json_response(404, json!({"error": "group not found"})));
+                }
+            }
             let email = body["email"].as_str().unwrap_or("").trim().to_lowercase();
             if email.is_empty() {
                 return Ok(json_response(400, json!({"error": "email required"})));
             }
             let token = general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<24>());
-            let store = state.store.lock().unwrap();
-            let mut data = store.read()?;
-            data["invites"][&token] = json!({"email": email});
+            let invite = match &group_id {
+                Some(id) => json!({"email": email, "group_id": id}),
+                None => json!({"email": email}),
+            };
+            data["invites"][&token] = invite;
             store.write(&data)?;
             Ok(json_response(
                 201,
-                json!({"email": email, "invite_token": token, "email_status": "Configure SMTP later; this invite token is returned for manual delivery."}),
+                json!({
+                    "email": email,
+                    "invite_token": token,
+                    "group_id": group_id,
+                    "email_status": "Configure SMTP later; this invite token is returned for manual delivery."
+                }),
             ))
         }
         (Method::Post, "/api/register") => {
@@ -2978,14 +3364,27 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             }
             let store = state.store.lock().unwrap();
             let mut data = store.read()?;
-            let Some(email) = data["invites"][invite_token]["email"]
-                .as_str()
-                .map(str::to_owned)
-            else {
+            let invite = data["invites"][invite_token].clone();
+            let Some(email) = invite["email"].as_str().map(str::to_owned) else {
                 return Ok(json_response(400, json!({"error": "invalid invite"})));
             };
+            let invite_group_id = invite["group_id"].as_str().map(str::to_owned);
             let secret = new_totp_secret();
             data["users"][&email] = json!({"email": email, "password_hash": hash_password(password, None), "totp_secret": secret, "is_admin": false, "registered": true});
+            // Auto-add the new user to the inviting admin's group so the
+            // group admin immediately has them in scope.
+            if let Some(group_id) = invite_group_id.as_ref() {
+                if data["groups"].get(group_id).is_some() {
+                    let mut members: Vec<Value> = data["groups"][group_id]["members"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if !members.iter().any(|m| m.as_str() == Some(email.as_str())) {
+                        members.push(json!(email));
+                        data["groups"][group_id]["members"] = json!(members);
+                    }
+                }
+            }
             if let Some(invites) = data["invites"].as_object_mut() {
                 invites.remove(invite_token);
             }
@@ -2994,7 +3393,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let otpauth_qr = otpauth_qr_png(&otpauth);
             Ok(json_response(
                 201,
-                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr}),
+                json!({"email": email, "totp_secret": secret, "otpauth_uri": otpauth, "otpauth_qr_png": otpauth_qr, "group_id": invite_group_id}),
             ))
         }
         (Method::Post, "/api/login") => {
@@ -3110,13 +3509,21 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     json!({"error": "missing or invalid bearer token"}),
                 ));
             };
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            let email = user["email"].as_str().unwrap_or("").to_owned();
+            let admin_groups = admin_group_ids_for(&data, &email);
+            let member_groups = member_group_ids_for(&data, &email);
             Ok(json_response(
                 200,
                 json!({
                     "email": user["email"],
                     "is_admin": user["is_admin"].as_bool().unwrap_or(false),
                     "disabled": user["disabled"].as_bool().unwrap_or(false),
-                    "registered": user["registered"].as_bool().unwrap_or(false)
+                    "registered": user["registered"].as_bool().unwrap_or(false),
+                    "admin_group_ids": admin_groups,
+                    "member_group_ids": member_groups,
+                    "is_group_admin": !admin_group_ids_for(&data, &email).is_empty()
                 }),
             ))
         }
@@ -3240,6 +3647,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     sessions.remove(&key);
                 }
             }
+            // Also revoke every desktop API token for the disabled user so
+            // a leaked token cannot keep talking to the server after the
+            // account has been turned off.
+            revoke_all_api_tokens_for(&mut data, &target);
             store.write(&data)?;
             Ok(json_response(200, json!({"ok": true})))
         }
@@ -3391,6 +3802,890 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 200,
                 fs::read(file_path)?,
                 "application/octet-stream",
+            ))
+        }
+        // ---------------------------------------------------------------
+        // Persistent desktop API tokens. Web sessions remain the primary
+        // bearer for the SPA, but the desktop client needs a long-lived
+        // token it can paste into its config file. Every authenticated
+        // user can manage their own tokens; admins can manage any user's.
+        // ---------------------------------------------------------------
+        (Method::Get, "/api/tokens") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            let email = user["email"].as_str().unwrap_or("");
+            Ok(json_response(
+                200,
+                json!({"tokens": list_api_tokens_for(&data, email)}),
+            ))
+        }
+        (Method::Post, "/api/tokens") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = read_body(&mut request)?;
+            let label = body["label"].as_str().unwrap_or("Desktop client");
+            if label.len() > 64 {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "label must be 64 characters or fewer"}),
+                ));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let email = user["email"].as_str().unwrap_or("").to_owned();
+            let (raw, id, entry) = mint_api_token(&mut data, &email, label);
+            store.write(&data)?;
+            Ok(json_response(
+                201,
+                json!({"token": raw, "id": id, "entry": entry}),
+            ))
+        }
+        (Method::Delete, path) if path.starts_with("/api/tokens/") => {
+            let Some(user) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let id = urlencoding::decode(path.trim_start_matches("/api/tokens/"))?.into_owned();
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let email = user["email"].as_str().unwrap_or("");
+            let removed = revoke_api_token(&mut data, email, &id);
+            if removed {
+                store.write(&data)?;
+                Ok(json_response(200, json!({"ok": true})))
+            } else {
+                Ok(json_response(404, json!({"error": "token not found"})))
+            }
+        }
+        (Method::Get, path)
+            if path.starts_with("/api/admin/users/") && path.ends_with("/tokens") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let target = urlencoding::decode(
+                path.trim_start_matches("/api/admin/users/")
+                    .trim_end_matches("/tokens"),
+            )?
+            .into_owned()
+            .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if !can_admin_user(&data, &actor, &target) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            Ok(json_response(
+                200,
+                json!({"tokens": list_api_tokens_for(&data, &target)}),
+            ))
+        }
+        (Method::Post, path)
+            if path.starts_with("/api/admin/users/") && path.ends_with("/tokens") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let target = urlencoding::decode(
+                path.trim_start_matches("/api/admin/users/")
+                    .trim_end_matches("/tokens"),
+            )?
+            .into_owned()
+            .to_lowercase();
+            let body = read_body(&mut request)?;
+            let label = body["label"].as_str().unwrap_or("Desktop client");
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if !can_admin_user(&data, &actor, &target) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            if data["users"].get(&target).is_none() {
+                return Ok(json_response(404, json!({"error": "user not found"})));
+            }
+            let (raw, id, entry) = mint_api_token(&mut data, &target, label);
+            store.write(&data)?;
+            Ok(json_response(
+                201,
+                json!({"token": raw, "id": id, "entry": entry}),
+            ))
+        }
+        (Method::Delete, path)
+            if path.starts_with("/api/admin/users/") && path.contains("/tokens/") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = path.trim_start_matches("/api/admin/users/");
+            let Some((email_part, id_part)) = body.split_once("/tokens/") else {
+                return Ok(json_response(400, json!({"error": "invalid path"})));
+            };
+            let target = urlencoding::decode(email_part)?.into_owned().to_lowercase();
+            let id = urlencoding::decode(id_part)?.into_owned();
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if !can_admin_user(&data, &actor, &target) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            let removed = revoke_api_token(&mut data, &target, &id);
+            if removed {
+                store.write(&data)?;
+                Ok(json_response(200, json!({"ok": true})))
+            } else {
+                Ok(json_response(404, json!({"error": "token not found"})))
+            }
+        }
+        // ---------------------------------------------------------------
+        // Group management. Groups exist so a non-global admin can
+        // administer their own slice of users (a "family" or "friends"
+        // group). Membership is many-to-many; each group can have
+        // multiple admins; group admins can promote other members of the
+        // same group to group admin.
+        // ---------------------------------------------------------------
+        (Method::Get, "/api/groups") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            let visible: Vec<Value> = data["groups"]
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.iter())
+                .filter(|(id, _)| {
+                    is_global_admin(&actor)
+                        || is_group_admin(&data, &actor_email, id)
+                        || data["groups"][*id]["members"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|m| m.as_str() == Some(actor_email.as_str()))
+                })
+                .map(|(_, group)| group.clone())
+                .collect();
+            Ok(json_response(200, json!({"groups": visible})))
+        }
+        (Method::Post, "/api/groups") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            // Only global admins can create new groups; group admins can
+            // only manage groups they already admin.
+            if !is_global_admin(&actor) {
+                return Ok(json_response(
+                    403,
+                    json!({"error": "global admin required to create groups"}),
+                ));
+            }
+            let body = read_body(&mut request)?;
+            let id = body["id"].as_str().unwrap_or("").trim().to_lowercase();
+            let name = body["name"].as_str().unwrap_or("").trim();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "id must be 1-64 chars of [A-Za-z0-9_-]"}),
+                ));
+            }
+            if name.is_empty() || name.len() > 128 {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "name is required (max 128 chars)"}),
+                ));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if data["groups"].get(&id).is_some() {
+                return Ok(json_response(409, json!({"error": "group already exists"})));
+            }
+            let initial_admins: Vec<Value> = body["admins"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_str().map(|s| json!(s.to_lowercase())))
+                .collect();
+            let initial_members: Vec<Value> = body["members"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_str().map(|s| json!(s.to_lowercase())))
+                .collect();
+            data["groups"][&id] = json!({
+                "id": id,
+                "name": name,
+                "admins": initial_admins,
+                "members": initial_members,
+                "created_at": unix_time(),
+                "created_by": actor["email"].as_str().unwrap_or("")
+            });
+            store.write(&data)?;
+            Ok(json_response(201, data["groups"][&id].clone()))
+        }
+        (Method::Delete, path) if path.starts_with("/api/groups/") && !path.contains("/members") && !path.contains("/admins") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !is_global_admin(&actor) {
+                return Ok(json_response(403, json!({"error": "global admin required"})));
+            }
+            let id = urlencoding::decode(path.trim_start_matches("/api/groups/"))?.into_owned();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(400, json!({"error": "invalid group id"})));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let removed = data["groups"]
+                .as_object_mut()
+                .map(|map| map.remove(&id).is_some())
+                .unwrap_or(false);
+            if removed {
+                store.write(&data)?;
+                Ok(json_response(200, json!({"ok": true})))
+            } else {
+                Ok(json_response(404, json!({"error": "group not found"})))
+            }
+        }
+        (Method::Post, path)
+            if path.starts_with("/api/groups/") && path.ends_with("/members") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let id = urlencoding::decode(
+                path.trim_start_matches("/api/groups/")
+                    .trim_end_matches("/members"),
+            )?
+            .into_owned();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(400, json!({"error": "invalid group id"})));
+            }
+            let body = read_body(&mut request)?;
+            let target = body["email"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if target.is_empty() {
+                return Ok(json_response(400, json!({"error": "email required"})));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            if !is_global_admin(&actor) && !is_group_admin(&data, &actor_email, &id) {
+                return Ok(json_response(
+                    403,
+                    json!({"error": "must be a global or group admin"}),
+                ));
+            }
+            if data["groups"].get(&id).is_none() {
+                return Ok(json_response(404, json!({"error": "group not found"})));
+            }
+            if data["users"].get(&target).is_none() {
+                return Ok(json_response(404, json!({"error": "user not found"})));
+            }
+            let members = data["groups"][&id]["members"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if !members.iter().any(|m| m.as_str() == Some(target.as_str())) {
+                let mut updated = members;
+                updated.push(json!(target));
+                data["groups"][&id]["members"] = json!(updated);
+                store.write(&data)?;
+            }
+            Ok(json_response(200, data["groups"][&id].clone()))
+        }
+        (Method::Delete, path)
+            if path.starts_with("/api/groups/") && path.contains("/members/") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = path.trim_start_matches("/api/groups/");
+            let Some((id_part, email_part)) = body.split_once("/members/") else {
+                return Ok(json_response(400, json!({"error": "invalid path"})));
+            };
+            let id = urlencoding::decode(id_part)?.into_owned();
+            let target = urlencoding::decode(email_part)?.into_owned().to_lowercase();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(400, json!({"error": "invalid group id"})));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            if !is_global_admin(&actor) && !is_group_admin(&data, &actor_email, &id) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            if data["groups"].get(&id).is_none() {
+                return Ok(json_response(404, json!({"error": "group not found"})));
+            }
+            let mut members: Vec<Value> = data["groups"][&id]["members"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            members.retain(|m| m.as_str() != Some(target.as_str()));
+            // Removing a member also strips them from the group's admins
+            // list so we don't end up with an admin who isn't a member.
+            let mut admins: Vec<Value> = data["groups"][&id]["admins"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            admins.retain(|m| m.as_str() != Some(target.as_str()));
+            data["groups"][&id]["members"] = json!(members);
+            data["groups"][&id]["admins"] = json!(admins);
+            store.write(&data)?;
+            Ok(json_response(200, data["groups"][&id].clone()))
+        }
+        (Method::Post, path)
+            if path.starts_with("/api/groups/") && path.contains("/admins/") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = path.trim_start_matches("/api/groups/");
+            let Some((id_part, email_part)) = body.split_once("/admins/") else {
+                return Ok(json_response(400, json!({"error": "invalid path"})));
+            };
+            let id = urlencoding::decode(id_part)?.into_owned();
+            let target = urlencoding::decode(email_part)?.into_owned().to_lowercase();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(400, json!({"error": "invalid group id"})));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            if !is_global_admin(&actor) && !is_group_admin(&data, &actor_email, &id) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            if data["groups"].get(&id).is_none() {
+                return Ok(json_response(404, json!({"error": "group not found"})));
+            }
+            // Promotion target must already be a member of the group.
+            let is_member = data["groups"][&id]["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m.as_str() == Some(target.as_str()));
+            if !is_member {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "user must be a member of the group first"}),
+                ));
+            }
+            let mut admins: Vec<Value> = data["groups"][&id]["admins"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if !admins.iter().any(|m| m.as_str() == Some(target.as_str())) {
+                admins.push(json!(target));
+                data["groups"][&id]["admins"] = json!(admins);
+                store.write(&data)?;
+            }
+            Ok(json_response(200, data["groups"][&id].clone()))
+        }
+        (Method::Delete, path)
+            if path.starts_with("/api/groups/") && path.contains("/admins/") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = path.trim_start_matches("/api/groups/");
+            let Some((id_part, email_part)) = body.split_once("/admins/") else {
+                return Ok(json_response(400, json!({"error": "invalid path"})));
+            };
+            let id = urlencoding::decode(id_part)?.into_owned();
+            let target = urlencoding::decode(email_part)?.into_owned().to_lowercase();
+            if !is_safe_group_id(&id) {
+                return Ok(json_response(400, json!({"error": "invalid group id"})));
+            }
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            if !is_global_admin(&actor) && !is_group_admin(&data, &actor_email, &id) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            if data["groups"].get(&id).is_none() {
+                return Ok(json_response(404, json!({"error": "group not found"})));
+            }
+            let mut admins: Vec<Value> = data["groups"][&id]["admins"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            admins.retain(|m| m.as_str() != Some(target.as_str()));
+            data["groups"][&id]["admins"] = json!(admins);
+            store.write(&data)?;
+            Ok(json_response(200, data["groups"][&id].clone()))
+        }
+        // ---------------------------------------------------------------
+        // Promote / demote a user as a global admin. Only the global
+        // admin can change global-admin status. (Group admin promotion is
+        // handled per-group above.)
+        // ---------------------------------------------------------------
+        (Method::Post, path)
+            if path.starts_with("/api/admin/users/") && path.ends_with("/promote") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !is_global_admin(&actor) {
+                return Ok(json_response(403, json!({"error": "global admin required"})));
+            }
+            let target = urlencoding::decode(
+                path.trim_start_matches("/api/admin/users/")
+                    .trim_end_matches("/promote"),
+            )?
+            .into_owned()
+            .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if data["users"].get(&target).is_none() {
+                return Ok(json_response(404, json!({"error": "user not found"})));
+            }
+            data["users"][&target]["is_admin"] = json!(true);
+            store.write(&data)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        (Method::Post, path)
+            if path.starts_with("/api/admin/users/") && path.ends_with("/demote") =>
+        {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            if !is_global_admin(&actor) {
+                return Ok(json_response(403, json!({"error": "global admin required"})));
+            }
+            let target = urlencoding::decode(
+                path.trim_start_matches("/api/admin/users/")
+                    .trim_end_matches("/demote"),
+            )?
+            .into_owned()
+            .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let mut data = store.read()?;
+            if data["users"].get(&target).is_none() {
+                return Ok(json_response(404, json!({"error": "user not found"})));
+            }
+            // Don't let the last global admin demote themselves into an
+            // unmanageable system.
+            let remaining_admins = data["users"]
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.iter())
+                .filter(|(email, user)| {
+                    email.as_str() != target && user["is_admin"].as_bool().unwrap_or(false)
+                })
+                .count();
+            if remaining_admins == 0 {
+                return Ok(json_response(
+                    400,
+                    json!({"error": "cannot demote the last global admin"}),
+                ));
+            }
+            data["users"][&target]["is_admin"] = json!(false);
+            store.write(&data)?;
+            Ok(json_response(200, json!({"ok": true})))
+        }
+        // ---------------------------------------------------------------
+        // Game Saves API. Backed by `data_dir/files/{owner}/...` (the same
+        // tree the desktop client pushes to). The hierarchy is
+        // owner → emulator → game → file. Drilldown is path-based:
+        // every level is "list children" and every leaf is "download".
+        // ---------------------------------------------------------------
+        (Method::Get, "/api/saves/users") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            let owners = visible_user_emails(&data, &actor);
+            // Annotate each visible user with the count of emulator-level
+            // subfolders so the UI can show empty rows distinctly.
+            let entries: Vec<Value> = owners
+                .into_iter()
+                .map(|email| {
+                    let dir = state.data_dir.join("files").join(&email);
+                    let emulators = if dir.exists() {
+                        fs::read_dir(&dir)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().is_dir())
+                            .count()
+                    } else {
+                        0
+                    };
+                    json!({"email": email, "emulator_count": emulators})
+                })
+                .collect();
+            Ok(json_response(200, json!({"users": entries})))
+        }
+        (Method::Get, path) if path.starts_with("/api/saves/list/") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let owner = urlencoding::decode(path.trim_start_matches("/api/saves/list/"))?
+                .into_owned()
+                .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if !can_admin_user(&data, &actor, &owner) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            let sub = query_param(&raw_url, "path").unwrap_or("");
+            let resolved = resolve_save_path(&state.data_dir, &owner, sub)?;
+            Ok(json_response(200, list_save_directory(&resolved)?))
+        }
+        (Method::Get, path) if path.starts_with("/api/saves/file/") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let owner = urlencoding::decode(path.trim_start_matches("/api/saves/file/"))?
+                .into_owned()
+                .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if !can_admin_user(&data, &actor, &owner) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            let sub = query_param(&raw_url, "path").unwrap_or("");
+            let decoded_sub = urlencoding::decode(sub)?.into_owned();
+            let resolved = resolve_save_path(&state.data_dir, &owner, &decoded_sub)?;
+            if !resolved.exists() || !resolved.is_file() {
+                return Ok(json_response(404, json!({"error": "file not found"})));
+            }
+            Ok(response(
+                200,
+                fs::read(&resolved)?,
+                "application/octet-stream",
+            ))
+        }
+        (Method::Get, path) if path.starts_with("/api/saves/zip/") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let owner = urlencoding::decode(path.trim_start_matches("/api/saves/zip/"))?
+                .into_owned()
+                .to_lowercase();
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            if !can_admin_user(&data, &actor, &owner) {
+                return Ok(json_response(403, json!({"error": "not allowed"})));
+            }
+            let sub = query_param(&raw_url, "path").unwrap_or("");
+            let decoded_sub = urlencoding::decode(sub)?.into_owned();
+            let resolved = resolve_save_path(&state.data_dir, &owner, &decoded_sub)?;
+            if !resolved.exists() || !resolved.is_dir() {
+                return Ok(json_response(404, json!({"error": "folder not found"})));
+            }
+            let bytes = zip_directory(&resolved)?;
+            Ok(response(200, bytes, "application/zip"))
+        }
+        // ---------------------------------------------------------------
+        // Scoped emulator-update fan-out. The bundle the server publishes
+        // is shared (a single zip per emulator/os), so the underlying
+        // mechanism is unchanged from `/api/admin/apply-emulator-update`,
+        // but this endpoint records the targeted scope and enforces RBAC
+        // so a non-global admin can only update users they administer.
+        // Body: {"scope":"all|user|os|emulator","users":[...],"os":"all|windows|linux","emulator_ids":[...]}
+        // ---------------------------------------------------------------
+        (Method::Post, "/api/emulators/update") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let body = read_body(&mut request)?;
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            // Normalize the requested user list. Empty / "all" means "every
+            // user the actor can administer".
+            let actor_email = actor["email"].as_str().unwrap_or("").to_owned();
+            let visible = visible_user_emails(&data, &actor);
+            let requested_users: Vec<String> = body["users"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+                .collect();
+            let target_users: Vec<String> = if requested_users.is_empty() {
+                visible.clone()
+            } else {
+                requested_users
+                    .into_iter()
+                    .filter(|email| visible.contains(email))
+                    .collect()
+            };
+            if target_users.is_empty() {
+                return Ok(json_response(
+                    403,
+                    json!({"error": "no users in your administrable scope"}),
+                ));
+            }
+            // Standard users without any group-admin powers can only
+            // update their own emulators.
+            if !is_global_admin(&actor)
+                && admin_group_ids_for(&data, &actor_email).is_empty()
+                && (target_users.len() != 1 || target_users[0] != actor_email)
+            {
+                return Ok(json_response(
+                    403,
+                    json!({"error": "standard users can only update their own emulators"}),
+                ));
+            }
+            let target_os = body["os"].as_str().unwrap_or("all").to_owned();
+            let os_targets: Vec<&str> = match target_os.as_str() {
+                "all" => vec!["windows", "linux"],
+                "windows" => vec!["windows"],
+                "linux" => vec!["linux"],
+                _ => {
+                    return Ok(json_response(
+                        400,
+                        json!({"error": "os must be 'all', 'windows', or 'linux'"}),
+                    ));
+                }
+            };
+            let requested_emulators: Vec<String> = body["emulator_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            let target_emulators: Vec<String> = if requested_emulators.is_empty() {
+                manifest()["emulators"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e["id"].as_str().map(str::to_owned))
+                    .collect()
+            } else {
+                requested_emulators
+            };
+            drop(store);
+            // Publish each (emulator, os) bundle once; the bundle is
+            // shared across users but we record the targeted users for
+            // audit purposes.
+            let mut published: Vec<Value> = Vec::new();
+            let mut errors: Vec<Value> = Vec::new();
+            for id in &target_emulators {
+                let Some(emulator) = emulator_by_id(id) else {
+                    errors.push(
+                        json!({"emulator_id": id, "error": "unknown emulator id"}),
+                    );
+                    continue;
+                };
+                let release = match latest_release(&emulator) {
+                    Ok(r) => r,
+                    Err(error) => {
+                        errors.push(json!({
+                            "emulator_id": id,
+                            "error": format!("failed to query upstream: {error}")
+                        }));
+                        continue;
+                    }
+                };
+                for os in &os_targets {
+                    let asset_url = if *os == current_os() {
+                        release.download_url.clone()
+                    } else {
+                        pick_asset(
+                            &release_assets_for_os(&emulator, os).unwrap_or_default(),
+                            os,
+                        )
+                    };
+                    let Some(url) = asset_url else {
+                        errors.push(json!({
+                            "emulator_id": id,
+                            "os": os,
+                            "error": format!("no upstream asset matched for {os}")
+                        }));
+                        continue;
+                    };
+                    if !url.starts_with("https://") {
+                        errors.push(json!({
+                            "emulator_id": id,
+                            "os": os,
+                            "error": "asset URL must use HTTPS"
+                        }));
+                        continue;
+                    }
+                    let bytes = match ureq::get(&url)
+                        .header("User-Agent", "crash-crafts-game-sync")
+                        .call()
+                        .and_then(|r| r.into_body().read_to_vec())
+                    {
+                        Ok(b) => b,
+                        Err(error) => {
+                            errors.push(json!({
+                                "emulator_id": id,
+                                "os": os,
+                                "error": format!("download failed: {error}")
+                            }));
+                            continue;
+                        }
+                    };
+                    if zip::ZipArchive::new(std::io::Cursor::new(&bytes)).is_err() {
+                        errors.push(json!({
+                            "emulator_id": id,
+                            "os": os,
+                            "error": "upstream asset is not a zip; admin must repackage"
+                        }));
+                        continue;
+                    }
+                    let dir = state.data_dir.join("emulator-bundles").join(id);
+                    secure_create_dir_all(&dir)?;
+                    let target_path = dir.join(format!("{os}.zip"));
+                    fs::write(&target_path, &bytes)?;
+                    published.push(json!({
+                        "emulator_id": id,
+                        "os": os,
+                        "version": release.version,
+                        "bytes": bytes.len(),
+                        "users": target_users
+                    }));
+                    // Persist applied version + per-user audit trail.
+                    let store = state.store.lock().unwrap();
+                    let mut data = store.read()?;
+                    if !data["applied_emulator_versions"].is_object() {
+                        data["applied_emulator_versions"] = json!({});
+                    }
+                    data["applied_emulator_versions"][id] = json!({
+                        "version": release.version,
+                        "published_at": release.published_at,
+                        "applied_at": unix_time(),
+                        "applied_by": actor_email
+                    });
+                    if !data["user_emulator_targets"].is_object() {
+                        data["user_emulator_targets"] = json!({});
+                    }
+                    for email in &target_users {
+                        if !data["user_emulator_targets"][email].is_object() {
+                            data["user_emulator_targets"][email] = json!({});
+                        }
+                        if !data["user_emulator_targets"][email][id].is_object() {
+                            data["user_emulator_targets"][email][id] = json!({});
+                        }
+                        data["user_emulator_targets"][email][id][os] = json!({
+                            "version": release.version,
+                            "applied_at": unix_time(),
+                            "applied_by": actor_email
+                        });
+                    }
+                    store.write(&data)?;
+                }
+            }
+            Ok(json_response(
+                200,
+                json!({
+                    "ok": !published.is_empty(),
+                    "users": target_users,
+                    "os": target_os,
+                    "emulators": target_emulators,
+                    "published": published,
+                    "errors": errors
+                }),
+            ))
+        }
+        // List the per-user / per-OS / per-emulator update state visible
+        // to the actor. Drives the Emulators tab drilldown UI.
+        (Method::Get, "/api/emulators/scoped") => {
+            let Some(actor) = require_user(&state, &request)? else {
+                return Ok(json_response(
+                    401,
+                    json!({"error": "missing or invalid bearer token"}),
+                ));
+            };
+            let store = state.store.lock().unwrap();
+            let data = store.read()?;
+            let visible = visible_user_emails(&data, &actor);
+            let manifest = manifest();
+            let emulators: Vec<Value> = manifest["emulators"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| {
+                    json!({
+                        "id": e["id"],
+                        "name": e["name"]
+                    })
+                })
+                .collect();
+            let users: Vec<Value> = visible
+                .into_iter()
+                .map(|email| {
+                    let targets = data["user_emulator_targets"][&email].clone();
+                    json!({"email": email, "targets": targets})
+                })
+                .collect();
+            Ok(json_response(
+                200,
+                json!({
+                    "users": users,
+                    "emulators": emulators,
+                    "applied": data["applied_emulator_versions"].clone()
+                }),
             ))
         }
         _ => Ok(json_response(404, json!({"error": "not found"}))),
@@ -5229,5 +6524,169 @@ mod tests {
     fn pick_free_port() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn api_token_mint_lookup_revoke_round_trip() {
+        let mut data = json!({"api_tokens": {}});
+        let (raw, id, entry) = mint_api_token(&mut data, "alice@example.com", "Desktop");
+        assert_eq!(entry["email"], "alice@example.com");
+        assert_eq!(entry["label"], "Desktop");
+
+        // Lookup must locate the owner from the raw token (not from the
+        // digest) and bump last_used_at.
+        let owner = api_token_owner(&mut data, &raw);
+        assert_eq!(owner.as_deref(), Some("alice@example.com"));
+        let digest = hash_api_token(&raw);
+        assert!(data["api_tokens"][&digest]["last_used_at"].as_u64().unwrap() > 0);
+
+        // Listing should return the entry without exposing the digest as
+        // a key inside the entry.
+        let listed = list_api_tokens_for(&data, "alice@example.com");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], id);
+
+        // Revoke removes by id, scoped to the email.
+        assert!(revoke_api_token(&mut data, "alice@example.com", &id));
+        assert!(api_token_owner(&mut data, &raw).is_none());
+        assert!(list_api_tokens_for(&data, "alice@example.com").is_empty());
+
+        // Wrong-owner revoke must not delete somebody else's token.
+        let (raw2, id2, _) = mint_api_token(&mut data, "alice@example.com", "Desktop");
+        assert!(!revoke_api_token(&mut data, "bob@example.com", &id2));
+        assert_eq!(
+            api_token_owner(&mut data, &raw2).as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn group_admin_visibility_and_authorization() {
+        let data = json!({
+            "users": {
+                "root@example.com": {"email": "root@example.com", "is_admin": true},
+                "boss@example.com": {"email": "boss@example.com", "is_admin": false},
+                "kid@example.com": {"email": "kid@example.com", "is_admin": false},
+                "stranger@example.com": {"email": "stranger@example.com", "is_admin": false}
+            },
+            "groups": {
+                "family": {
+                    "id": "family",
+                    "name": "Family",
+                    "admins": ["boss@example.com"],
+                    "members": ["boss@example.com", "kid@example.com"]
+                }
+            }
+        });
+        let root = data["users"]["root@example.com"].clone();
+        let boss = data["users"]["boss@example.com"].clone();
+        let kid = data["users"]["kid@example.com"].clone();
+        let stranger = data["users"]["stranger@example.com"].clone();
+
+        // Global admin sees every user.
+        let visible_root = visible_user_emails(&data, &root);
+        assert!(visible_root.contains(&"root@example.com".to_owned()));
+        assert!(visible_root.contains(&"stranger@example.com".to_owned()));
+
+        // Group admin sees only themselves + group members.
+        let visible_boss = visible_user_emails(&data, &boss);
+        assert!(visible_boss.contains(&"kid@example.com".to_owned()));
+        assert!(!visible_boss.contains(&"stranger@example.com".to_owned()));
+
+        // Standard user sees only themselves.
+        let visible_kid = visible_user_emails(&data, &kid);
+        assert_eq!(visible_kid, vec!["kid@example.com".to_owned()]);
+
+        // can_admin_user enforces the same boundary.
+        assert!(can_admin_user(&data, &boss, "kid@example.com"));
+        assert!(!can_admin_user(&data, &boss, "stranger@example.com"));
+        assert!(can_admin_user(&data, &kid, "kid@example.com"));
+        assert!(!can_admin_user(&data, &kid, "boss@example.com"));
+        assert!(!can_admin_user(&data, &stranger, "boss@example.com"));
+        assert!(can_admin_user(&data, &root, "stranger@example.com"));
+    }
+
+    #[test]
+    fn safe_group_id_rejects_traversal_and_special_chars() {
+        assert!(is_safe_group_id("family"));
+        assert!(is_safe_group_id("crew_42"));
+        assert!(is_safe_group_id("a-b"));
+        assert!(!is_safe_group_id(""));
+        assert!(!is_safe_group_id("../etc"));
+        assert!(!is_safe_group_id("with space"));
+        assert!(!is_safe_group_id("a/b"));
+        assert!(!is_safe_group_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn save_path_resolution_rejects_traversal() {
+        let temp = TempDir::new().unwrap();
+        let owner = "alice@example.com";
+        let owner_root = temp.path().join("files").join(owner);
+        fs::create_dir_all(&owner_root).unwrap();
+
+        // Empty / "." resolve to the owner root.
+        assert_eq!(
+            resolve_save_path(temp.path(), owner, "").unwrap(),
+            owner_root
+        );
+        assert_eq!(
+            resolve_save_path(temp.path(), owner, ".").unwrap(),
+            owner_root
+        );
+
+        // A normal sub path resolves under the owner root.
+        let sub = resolve_save_path(temp.path(), owner, "duckstation/memcards").unwrap();
+        assert!(sub.starts_with(&owner_root));
+
+        // Traversal must be rejected.
+        assert!(resolve_save_path(temp.path(), owner, "../bob").is_err());
+        assert!(resolve_save_path(temp.path(), owner, "duckstation/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn list_save_directory_groups_into_dirs_and_files() {
+        let temp = TempDir::new().unwrap();
+        let owner_root = temp.path();
+        fs::create_dir_all(owner_root.join("duckstation/memcards")).unwrap();
+        fs::write(
+            owner_root.join("duckstation/memcards/card.mcd"),
+            b"savedata",
+        )
+        .unwrap();
+        fs::write(owner_root.join("readme.txt"), b"hello").unwrap();
+
+        let listing = list_save_directory(owner_root).unwrap();
+        let dirs = listing["directories"].as_array().unwrap();
+        let files = listing["files"].as_array().unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0]["name"], "duckstation");
+        assert_eq!(dirs[0]["file_count"], 1);
+        assert_eq!(dirs[0]["size"], 8);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["name"], "readme.txt");
+        assert_eq!(files[0]["size"], 5);
+    }
+
+    #[test]
+    fn zip_directory_preserves_subtree_relative_paths() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("dolphin");
+        fs::create_dir_all(root.join("User/GC")).unwrap();
+        fs::write(root.join("User/GC/MemoryCardA.USA.raw"), b"abc").unwrap();
+        fs::write(root.join("User/GC/MemoryCardB.USA.raw"), b"def").unwrap();
+        let zipped = zip_directory(&root).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zipped)).unwrap();
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "User/GC/MemoryCardA.USA.raw".to_owned(),
+                "User/GC/MemoryCardB.USA.raw".to_owned()
+            ]
+        );
     }
 }
