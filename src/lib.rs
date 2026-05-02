@@ -226,9 +226,7 @@ fn matches_any_detect_pattern(name: &str, patterns: &[&str]) -> bool {
         if lower_pattern == lower_name {
             return true;
         }
-        if lower_pattern.contains('*')
-            || lower_pattern.contains('?')
-            || lower_pattern.contains('[')
+        if lower_pattern.contains('*') || lower_pattern.contains('?') || lower_pattern.contains('[')
         {
             glob::Pattern::new(&lower_pattern)
                 .map(|pat| pat.matches(&lower_name))
@@ -2322,7 +2320,8 @@ fn list_save_directory(path: &Path) -> AppResult<Value> {
             let mut total_bytes = 0_u64;
             // Cheap recursive size for the leaf — bounded by the user's own
             // saves volume so it's safe to compute on demand.
-            walk_count(&entry_path, &mut file_count, &mut total_bytes).ok();            directories.push(json!({
+            walk_count(&entry_path, &mut file_count, &mut total_bytes).ok();
+            directories.push(json!({
                 "name": name,
                 "modified": modified,
                 "file_count": file_count,
@@ -3263,7 +3262,8 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             // Mint a starter desktop API token so the brand-new admin can
             // wire up the desktop client immediately. Without this, the
             // first-run admin had no way to obtain an `auth_token`.
-            let (raw_token, token_id, _) = mint_api_token(&mut data, &email, "First-run admin token");
+            let (raw_token, token_id, _) =
+                mint_api_token(&mut data, &email, "First-run admin token");
             let otpauth = otpauth_uri(&email, &secret);
             let otpauth_qr = otpauth_qr_png(&otpauth);
             store.write(&data)?;
@@ -3698,7 +3698,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             // can still administer their group via the group endpoints
             // but cannot terminate accounts.
             if !is_global_admin(&user) {
-                return Ok(json_response(403, json!({"error": "global admin required"})));
+                return Ok(json_response(
+                    403,
+                    json!({"error": "global admin required"}),
+                ));
             }
             let target = urlencoding::decode(
                 path.trim_start_matches("/api/users/")
@@ -4187,7 +4190,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 ));
             };
             if !is_global_admin(&actor) {
-                return Ok(json_response(403, json!({"error": "global admin required"})));
+                return Ok(json_response(
+                    403,
+                    json!({"error": "global admin required"}),
+                ));
             }
             let id = urlencoding::decode(path.trim_start_matches("/api/groups/"))?.into_owned();
             if !is_safe_group_id(&id) {
@@ -4206,9 +4212,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 Ok(json_response(404, json!({"error": "group not found"})))
             }
         }
-        (Method::Post, path)
-            if path.starts_with("/api/groups/") && path.ends_with("/members") =>
-        {
+        (Method::Post, path) if path.starts_with("/api/groups/") && path.ends_with("/members") => {
             let Some(actor) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -4224,11 +4228,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 return Ok(json_response(400, json!({"error": "invalid group id"})));
             }
             let body = read_body(&mut request)?;
-            let target = body["email"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_lowercase();
+            let target = body["email"].as_str().unwrap_or("").trim().to_lowercase();
             if target.is_empty() {
                 return Ok(json_response(400, json!({"error": "email required"})));
             }
@@ -4303,9 +4303,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             store.write(&data)?;
             Ok(json_response(200, data["groups"][&id].clone()))
         }
-        (Method::Post, path)
-            if path.starts_with("/api/groups/") && path.contains("/admins/") =>
-        {
+        (Method::Post, path) if path.starts_with("/api/groups/") && path.contains("/admins/") => {
             let Some(actor) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -4353,9 +4351,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             }
             Ok(json_response(200, data["groups"][&id].clone()))
         }
-        (Method::Delete, path)
-            if path.starts_with("/api/groups/") && path.contains("/admins/") =>
-        {
+        (Method::Delete, path) if path.starts_with("/api/groups/") && path.contains("/admins/") => {
             let Some(actor) = require_user(&state, &request)? else {
                 return Ok(json_response(
                     401,
@@ -4404,7 +4400,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 ));
             };
             if !is_global_admin(&actor) {
-                return Ok(json_response(403, json!({"error": "global admin required"})));
+                return Ok(json_response(
+                    403,
+                    json!({"error": "global admin required"}),
+                ));
             }
             let target = urlencoding::decode(
                 path.trim_start_matches("/api/admin/users/")
@@ -4431,7 +4430,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                 ));
             };
             if !is_global_admin(&actor) {
-                return Ok(json_response(403, json!({"error": "global admin required"})));
+                return Ok(json_response(
+                    403,
+                    json!({"error": "global admin required"}),
+                ));
             }
             let target = urlencoding::decode(
                 path.trim_start_matches("/api/admin/users/")
@@ -4661,9 +4663,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             let mut errors: Vec<Value> = Vec::new();
             for id in &target_emulators {
                 let Some(emulator) = emulator_by_id(id) else {
-                    errors.push(
-                        json!({"emulator_id": id, "error": "unknown emulator id"}),
-                    );
+                    errors.push(json!({"emulator_id": id, "error": "unknown emulator id"}));
                     continue;
                 };
                 let release = match latest_release(&emulator) {
@@ -5707,7 +5707,9 @@ mod tests {
         fs::write(install.join("Dolphin.exe"), "").unwrap();
         let found = detect_emulators(&install);
         assert!(
-            found.iter().any(|e| e["id"].as_str() == Some("dolphin-dev")),
+            found
+                .iter()
+                .any(|e| e["id"].as_str() == Some("dolphin-dev")),
             "expected dolphin-dev when root is the install dir, found={found:?}"
         );
     }
@@ -6669,7 +6671,12 @@ mod tests {
         let owner = api_token_owner(&mut data, &raw);
         assert_eq!(owner.as_deref(), Some("alice@example.com"));
         let digest = hash_api_token(&raw);
-        assert!(data["api_tokens"][&digest]["last_used_at"].as_u64().unwrap() > 0);
+        assert!(
+            data["api_tokens"][&digest]["last_used_at"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         // Listing should return the entry without exposing the digest as
         // a key inside the entry.
