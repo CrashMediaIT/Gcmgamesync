@@ -1655,7 +1655,7 @@ fn otpauth_qr_png(uri: &str) -> String {
     const QUIET: usize = 4;
     // Pick the smallest integer scale that yields at least ~256px wide.
     let total_modules = modules + 2 * QUIET;
-    let scale = ((256 + total_modules - 1) / total_modules).max(4);
+    let scale = 256_usize.div_ceil(total_modules).max(4);
     let side_px = total_modules * scale;
     let mut buf = vec![0xFFu8; side_px * side_px];
     for my in 0..modules {
@@ -3381,10 +3381,10 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     _ => {}
                 }
             }
-            if let Some(id) = &group_id {
-                if !is_safe_group_id(id) || data["groups"].get(id).is_none() {
-                    return Ok(json_response(404, json!({"error": "group not found"})));
-                }
+            if let Some(id) = &group_id
+                && (!is_safe_group_id(id) || data["groups"].get(id).is_none())
+            {
+                return Ok(json_response(404, json!({"error": "group not found"})));
             }
             let email = body["email"].as_str().unwrap_or("").trim().to_lowercase();
             if email.is_empty() {
@@ -3434,16 +3434,16 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
             data["users"][&email] = json!({"email": email, "password_hash": hash_password(password, None), "totp_secret": secret, "is_admin": false, "registered": true});
             // Auto-add the new user to the inviting admin's group so the
             // group admin immediately has them in scope.
-            if let Some(group_id) = invite_group_id.as_ref() {
-                if data["groups"].get(group_id).is_some() {
-                    let mut members: Vec<Value> = data["groups"][group_id]["members"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    if !members.iter().any(|m| m.as_str() == Some(email.as_str())) {
-                        members.push(json!(email));
-                        data["groups"][group_id]["members"] = json!(members);
-                    }
+            if let Some(group_id) = invite_group_id.as_ref()
+                && data["groups"].get(group_id).is_some()
+            {
+                let mut members: Vec<Value> = data["groups"][group_id]["members"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if !members.iter().any(|m| m.as_str() == Some(email.as_str())) {
+                    members.push(json!(email));
+                    data["groups"][group_id]["members"] = json!(members);
                 }
             }
             if let Some(invites) = data["invites"].as_object_mut() {
