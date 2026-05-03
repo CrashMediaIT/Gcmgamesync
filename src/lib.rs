@@ -2788,6 +2788,17 @@ body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !impo
 .emulator-list { display: grid; gap: 8px; }
 .emulator-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.035); }
 .emulator-row small { display: block; margin-top: 3px; }
+.saves-user-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
+.save-user-card { cursor: pointer; min-height: 116px; display: flex; flex-direction: column; justify-content: space-between; }
+.save-user-card h4 { overflow-wrap: anywhere; }
+.saves-actions { margin: 14px 0; }
+.saves-download { display: inline-block; padding: 8px 12px; border-radius: 10px; }
+.saves-list { display: grid; gap: 8px; margin-top: 12px; }
+.saves-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(72px, .32fr) minmax(56px, .24fr) minmax(110px, .42fr) minmax(84px, auto); gap: 12px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.035); }
+.saves-head { color: var(--muted); font-weight: 800; background: transparent; border-color: transparent; padding-top: 0; padding-bottom: 2px; }
+.saves-name { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.saves-name a, .saves-name span:last-child { overflow-wrap: anywhere; }
+.saves-icon { flex: 0 0 auto; }
 .crumb { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.05); border: 1px solid var(--border); color: var(--muted); margin-right: 6px; cursor: pointer; }
 .crumb.current { color: var(--text); background: rgba(255,122,26,.18); cursor: default; }
 .tokens-row { font-family: ui-monospace, SFMono-Regular, monospace; }
@@ -2797,6 +2808,7 @@ body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !impo
 .toggle { display: flex; align-items: center; gap: 10px; }
 .toggle input { width: auto; }
 @media (max-width: 820px) { .panel-grid, .card-pair { grid-template-columns: 1fr; } .form.inline { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .saves-head { display: none; } .saves-row { grid-template-columns: 1fr auto; gap: 8px 12px; } .saves-name { grid-column: 1 / -1; } }
 "#;
 
 fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {

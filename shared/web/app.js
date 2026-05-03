@@ -641,13 +641,13 @@
         return;
       }
       list.innerHTML =
-        '<div class="tile-grid">' +
+        '<div class="saves-user-grid">' +
         users
           .map(
             (u) =>
-              '<div class="tile" data-pick-owner="' +
+              '<div class="tile save-user-card" data-pick-owner="' +
               escapeHtml(u.email) +
-              '" style="cursor:pointer"><h4>' +
+              '"><h4>' +
               escapeHtml(u.email) +
               "</h4><p class=\"muted\">" +
               escapeHtml(u.emulator_count) +
@@ -720,32 +720,31 @@
     if (path) {
       const zipUrl = "/api/saves/zip/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(path);
       html +=
-        '<p><a href="' +
+        '<p class="saves-actions"><a href="' +
         zipUrl +
-        '" download class="secondary" style="display:inline-block;padding:8px 12px;border-radius:10px;border:1px solid var(--border)">Download this folder as zip</a></p>';
+        '" download class="secondary saves-download">Download this folder as zip</a></p>';
     }
     if (!dirs.length && !files.length) {
       html += '<p class="muted">Empty.</p>';
       list.innerHTML = html;
       return;
     }
-    html +=
-      '<table class="data"><thead><tr><th>Name</th><th>Size</th><th>Items</th><th>Modified</th><th>Action</th></tr></thead><tbody>' +
+    html += '<div class="saves-list"><div class="saves-row saves-head"><span>Name</span><span>Size</span><span>Items</span><span>Modified</span><span>Action</span></div>' +
       dirs
         .map((d) => {
           const sub = path ? path + "/" + d.name : d.name;
           return (
-            '<tr><td>📁 <a href="#" data-sub="' +
+            '<div class="saves-row"><span class="saves-name"><span class="saves-icon">📁</span><a href="#" data-sub="' +
             escapeHtml(sub) +
             '">' +
             escapeHtml(d.name) +
-            "</a></td><td>" +
+            "</a></span><span>" +
             escapeHtml(bytes(d.size)) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(d.file_count) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(timeAgo(d.modified)) +
-            "</td><td>—</td></tr>"
+            '</span><span class="muted">—</span></div>'
           );
         })
         .join("") +
@@ -754,19 +753,19 @@
           const sub = path ? path + "/" + f.name : f.name;
           const url = "/api/saves/file/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(sub);
           return (
-            "<tr><td>📄 " +
+            '<div class="saves-row"><span class="saves-name"><span class="saves-icon">📄</span>' +
             escapeHtml(f.name) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(bytes(f.size)) +
-            "</td><td>1</td><td>" +
+            "</span><span>1</span><span>" +
             escapeHtml(timeAgo(f.modified)) +
-            '</td><td><a href="' +
+            '</span><span><a href="' +
             url +
-            '" download>Download</a></td></tr>'
+            '" download>Download</a></span></div>'
           );
         })
         .join("") +
-      "</tbody></table>";
+      "</div>";
     list.innerHTML = html;
     $$("#saves-listing a[data-sub]").forEach((a) =>
       a.addEventListener("click", (e) => {
