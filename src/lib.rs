@@ -28,6 +28,7 @@ const MAX_LOGO_BYTES: usize = 262_144;
 const MAX_LOGO_BASE64_SIZE: usize = 349_528;
 const STATIC_APP_JS: &str = include_str!("../shared/web/app.js");
 const MAX_LOG_ENTRIES: usize = 1000;
+const MAX_EMULATOR_BUNDLE_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_DEVICE_HEARTBEATS: usize = 256;
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -474,6 +475,7 @@ fn fetch_latest_release_uncached(source: &Value, os: &str) -> AppResult<LatestRe
             })
         }
         "dolphin_dev_website" => fetch_dolphin_dev_release(os),
+        "retroarch_buildbot" => fetch_retroarch_buildbot_release(source, os),
         other => Err(format!("unsupported release source type: {other}").into()),
     }
 }
@@ -542,8 +544,34 @@ fn release_assets_for_os(emulator: &Value, os: &str) -> AppResult<Value> {
             let name = url.rsplit('/').next().unwrap_or("dolphin-dev").to_owned();
             Ok(json!([{ "name": name, "browser_download_url": url }]))
         }
+        "retroarch_buildbot" => {
+            let release = fetch_retroarch_buildbot_release(source, os)?;
+            let url = release.download_url.unwrap_or_default();
+            let name = url.rsplit('/').next().unwrap_or("RetroArch").to_owned();
+            Ok(json!([{ "name": name, "browser_download_url": url }]))
+        }
         other => Err(format!("unsupported release source type: {other}").into()),
     }
+}
+
+fn fetch_retroarch_buildbot_release(source: &Value, os: &str) -> AppResult<LatestRelease> {
+    let channel = source["channel"].as_str().unwrap_or("stable");
+    let channel_path = match channel {
+        "stable" | "nightly" => channel,
+        _ => "stable",
+    };
+    let artifact = match os {
+        "windows" => "windows/x86_64/RetroArch.7z",
+        "linux" => "linux/x86_64/RetroArch.AppImage",
+        _ => return Err(format!("RetroArch buildbot does not support {os}").into()),
+    };
+    let download_url = format!("https://buildbot.libretro.com/{channel_path}/{artifact}");
+    Ok(LatestRelease {
+        version: format!("buildbot-{channel_path}"),
+        published_at: String::new(),
+        download_url: Some(download_url),
+        source_url: format!("https://buildbot.libretro.com/{channel_path}/"),
+    })
 }
 
 /// Scrape `https://dolphin-emu.org/download/` for the latest
@@ -645,6 +673,17 @@ fn pick_asset(assets: &Value, os: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn download_upstream_bundle(url: &str) -> Result<Vec<u8>, ureq::Error> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", "crash-crafts-game-sync")
+        .call()?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_EMULATOR_BUNDLE_DOWNLOAD_BYTES)
+        .read_to_vec()
 }
 
 pub fn should_sync(relative_path: &str, emulator: &Value) -> bool {
@@ -2609,7 +2648,7 @@ fn render_ui(data: &Value) -> String {
 
     <section class="view hidden" data-view="emulators">
       <h2>Emulators</h2>
-      <p class="muted">Push the latest upstream emulator bundle to a single user, an OS, or everyone you administer. Drill into a user to see Linux and Windows tiles with per-emulator update buttons.</p>
+      <p class="muted">Use Update all for broad updates, or drill into a user folder, then an OS folder, then an emulator row for targeted updates.</p>
       <div id="emulators-toolbar" class="row"></div>
       <div id="emulators-tree"></div>
     </section>
@@ -2738,6 +2777,29 @@ body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !impo
 .tile { border: 1px solid var(--border); border-radius: 16px; padding: 14px; background: rgba(255,255,255,.04); }
 .tile h4 { margin: 0 0 8px 0; }
 .tile-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.folder { border: 1px solid var(--border); border-radius: 16px; background: rgba(255,255,255,.04); margin-top: 12px; overflow: hidden; }
+.folder summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
+.folder summary::-webkit-details-marker { display: none; }
+.folder summary::before { content: "▸"; color: var(--brand-2); margin-right: 4px; transition: transform .16s ease; }
+.folder[open] > summary::before { transform: rotate(90deg); }
+.folder-name { flex: 1; font-weight: 800; }
+.folder-children { border-top: 1px solid var(--border); padding: 12px 14px 14px 28px; background: rgba(0,0,0,.12); }
+.folder-actions { border-top: 1px solid var(--border); padding: 0 14px 12px 28px; background: rgba(0,0,0,.12); }
+.emulator-list { display: grid; gap: 8px; }
+.emulator-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.035); }
+.emulator-info { min-width: 0; }
+.emulator-row small { display: block; margin-top: 3px; }
+.saves-user-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
+.save-user-card { cursor: pointer; min-height: 116px; display: flex; flex-direction: column; justify-content: space-between; }
+.save-user-card h4 { overflow-wrap: anywhere; }
+.saves-actions { margin: 14px 0; }
+.saves-download { display: inline-block; padding: 8px 12px; border-radius: 10px; }
+.saves-list { display: grid; gap: 8px; margin-top: 12px; }
+.saves-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(72px, .32fr) minmax(56px, .24fr) minmax(110px, .42fr) minmax(84px, auto); gap: 12px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.035); }
+.saves-head { color: var(--muted); font-weight: 800; background: transparent; border-color: transparent; padding-top: 0; padding-bottom: 2px; }
+.saves-name { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.saves-name a, .saves-name span:last-child { overflow-wrap: anywhere; }
+.saves-icon { flex: 0 0 auto; }
 .crumb { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.05); border: 1px solid var(--border); color: var(--muted); margin-right: 6px; cursor: pointer; }
 .crumb.current { color: var(--text); background: rgba(255,122,26,.18); cursor: default; }
 .tokens-row { font-family: ui-monospace, SFMono-Regular, monospace; }
@@ -2747,6 +2809,7 @@ body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !impo
 .toggle { display: flex; align-items: center; gap: 10px; }
 .toggle input { width: auto; }
 @media (max-width: 820px) { .panel-grid, .card-pair { grid-template-columns: 1fr; } .form.inline { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .saves-head { display: none; } .saves-row { grid-template-columns: 1fr auto; gap: 8px 12px; } .saves-name { grid-column: 1 / -1; } }
 "#;
 
 fn json_response(status: u16, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -3151,11 +3214,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                     errors.push(json!({"os": os, "error": "asset URL must use HTTPS"}));
                     continue;
                 }
-                let bytes = match ureq::get(&url)
-                    .header("User-Agent", "crash-crafts-game-sync")
-                    .call()
-                    .and_then(|r| r.into_body().read_to_vec())
-                {
+                let bytes = match download_upstream_bundle(&url) {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         errors.push(json!({
@@ -4701,11 +4760,7 @@ fn handle_request(mut request: Request, state: Arc<AppState>) {
                         }));
                         continue;
                     }
-                    let bytes = match ureq::get(&url)
-                        .header("User-Agent", "crash-crafts-game-sync")
-                        .call()
-                        .and_then(|r| r.into_body().read_to_vec())
-                    {
+                    let bytes = match download_upstream_bundle(&url) {
                         Ok(b) => b,
                         Err(error) => {
                             errors.push(json!({
@@ -6108,6 +6163,22 @@ mod tests {
         assert_eq!(
             pick_asset(&assets, "linux"),
             Some("https://example/linux.AppImage".to_owned())
+        );
+    }
+
+    #[test]
+    fn retroarch_buildbot_release_source_returns_platform_artifacts() {
+        let source = json!({"type": "retroarch_buildbot", "channel": "stable"});
+        let windows = fetch_retroarch_buildbot_release(&source, "windows").unwrap();
+        assert_eq!(windows.version, "buildbot-stable");
+        assert_eq!(
+            windows.download_url.as_deref(),
+            Some("https://buildbot.libretro.com/stable/windows/x86_64/RetroArch.7z")
+        );
+        let linux = fetch_retroarch_buildbot_release(&source, "linux").unwrap();
+        assert_eq!(
+            linux.download_url.as_deref(),
+            Some("https://buildbot.libretro.com/stable/linux/x86_64/RetroArch.AppImage")
         );
     }
 

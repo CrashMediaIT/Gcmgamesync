@@ -511,7 +511,7 @@
     // Top-level fan-out actions. A standard user only sees themselves so
     // the "all users" button quietly maps to themselves anyway.
     toolbar.innerHTML =
-      '<button data-update-scope="all-all">Update all emulators (all users)</button>' +
+      '<button data-update-scope="all-all">Update all emulators</button>' +
       '<button class="secondary" data-update-scope="all-windows">Update all Windows</button>' +
       '<button class="secondary" data-update-scope="all-linux">Update all Linux</button>';
     $$("#emulators-toolbar button[data-update-scope]").forEach((btn) =>
@@ -526,41 +526,38 @@
       return;
     }
     tree.innerHTML = users
-      .map((u, idx) => {
+      .map((u) => {
         const targets = u.targets || {};
         return (
-          '<details class="tile" ' +
+          '<details class="folder emu-folder user-folder" ' +
           (users.length === 1 ? "open" : "") +
-          '><summary><strong>' +
+          '><summary><span class="folder-name">' +
           escapeHtml(u.email) +
-          "</strong></summary>" +
-          '<div class="row mt">' +
-          '<button data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="all">Update all emulators for this user</button>' +
-          '<button class="secondary" data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="windows">All Windows</button>' +
-          '<button class="secondary" data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="linux">All Linux</button>' +
-          "</div>" +
-          '<div class="tile-grid mt">' +
+          '</span><small class="muted">User</small></summary>' +
+          '<div class="folder-children">' +
           ["windows", "linux"]
             .map((os) => {
               return (
-                '<div class="tile"><h4>' +
+                '<details class="folder emu-folder os-folder"><summary><span class="folder-name">' +
                 escapeHtml(os) +
-                "</h4>" +
+                '</span><small class="muted">OS</small></summary>' +
+                '<div class="folder-actions"><button class="secondary" data-update-user="' +
+                escapeHtml(u.email) +
+                '" data-os="' +
+                escapeHtml(os) +
+                '">Update all ' +
+                escapeHtml(os) +
+                " emulators for this user</button></div>" +
+                '<div class="folder-children emulator-list">' +
                 emulators
                   .map((emu) => {
                     const t = (targets[emu.id] && targets[emu.id][os]) || null;
                     return (
-                      "<div>" +
+                      '<div class="emulator-row"><div class="emulator-info"><strong>' +
                       escapeHtml(emu.name) +
-                      ' <small class="muted">' +
+                      '</strong><small class="muted">' +
                       (t ? "v" + escapeHtml(t.version) + " — " + timeAgo(t.applied_at) : "never updated") +
-                      "</small> " +
+                      "</small></div>" +
                       '<button class="secondary" data-update-one="' +
                       escapeHtml(u.email) +
                       '" data-emu="' +
@@ -571,7 +568,7 @@
                     );
                   })
                   .join("") +
-                "</div>"
+                "</div></details>"
               );
             })
             .join("") +
@@ -644,13 +641,13 @@
         return;
       }
       list.innerHTML =
-        '<div class="tile-grid">' +
+        '<div class="saves-user-grid">' +
         users
           .map(
             (u) =>
-              '<div class="tile" data-pick-owner="' +
+              '<div class="tile save-user-card" data-pick-owner="' +
               escapeHtml(u.email) +
-              '" style="cursor:pointer"><h4>' +
+              '"><h4>' +
               escapeHtml(u.email) +
               "</h4><p class=\"muted\">" +
               escapeHtml(u.emulator_count) +
@@ -723,32 +720,31 @@
     if (path) {
       const zipUrl = "/api/saves/zip/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(path);
       html +=
-        '<p><a href="' +
+        '<p class="saves-actions"><a href="' +
         zipUrl +
-        '" download class="secondary" style="display:inline-block;padding:8px 12px;border-radius:10px;border:1px solid var(--border)">Download this folder as zip</a></p>';
+        '" download class="secondary saves-download">Download this folder as zip</a></p>';
     }
     if (!dirs.length && !files.length) {
       html += '<p class="muted">Empty.</p>';
       list.innerHTML = html;
       return;
     }
-    html +=
-      '<table class="data"><thead><tr><th>Name</th><th>Size</th><th>Items</th><th>Modified</th><th>Action</th></tr></thead><tbody>' +
+    html += '<div class="saves-list"><div class="saves-row saves-head"><span>Name</span><span>Size</span><span>Items</span><span>Modified</span><span>Action</span></div>' +
       dirs
         .map((d) => {
           const sub = path ? path + "/" + d.name : d.name;
           return (
-            '<tr><td>📁 <a href="#" data-sub="' +
+            '<div class="saves-row"><span class="saves-name"><span class="saves-icon">📁</span><a href="#" data-sub="' +
             escapeHtml(sub) +
             '">' +
             escapeHtml(d.name) +
-            "</a></td><td>" +
+            "</a></span><span>" +
             escapeHtml(bytes(d.size)) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(d.file_count) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(timeAgo(d.modified)) +
-            "</td><td>—</td></tr>"
+            '</span><span class="muted">—</span></div>'
           );
         })
         .join("") +
@@ -757,19 +753,19 @@
           const sub = path ? path + "/" + f.name : f.name;
           const url = "/api/saves/file/" + encodeURIComponent(owner) + "?path=" + encodeURIComponent(sub);
           return (
-            "<tr><td>📄 " +
+            '<div class="saves-row"><span class="saves-name"><span class="saves-icon">📄</span>' +
             escapeHtml(f.name) +
-            "</td><td>" +
+            "</span><span>" +
             escapeHtml(bytes(f.size)) +
-            "</td><td>1</td><td>" +
+            "</span><span>1</span><span>" +
             escapeHtml(timeAgo(f.modified)) +
-            '</td><td><a href="' +
+            '</span><span><a href="' +
             url +
-            '" download>Download</a></td></tr>'
+            '" download>Download</a></span></div>'
           );
         })
         .join("") +
-      "</tbody></table>";
+      "</div>";
     list.innerHTML = html;
     $$("#saves-listing a[data-sub]").forEach((a) =>
       a.addEventListener("click", (e) => {
