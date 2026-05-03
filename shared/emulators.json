@@ -107,6 +107,10 @@
       "sync_include": ["saves/**", "states/**", "system/**", "playlists/**"],
       "sync_exclude": ["retroarch.cfg", "config/**", "autoconfig/**", "logs/**"],
       "release_source": {"type": "github_release", "repo": "libretro/RetroArch"},
+      "release_source_overrides": {
+        "windows": {"type": "retroarch_buildbot", "channel": "stable"},
+        "linux": {"type": "retroarch_buildbot", "channel": "stable"}
+      },
       "updates": {"windows": {"source": "buildbot", "channel": "nightly"}, "linux": {"source": "flatpak-or-buildbot", "package": "org.libretro.RetroArch"}}
     },
     {

@@ -511,7 +511,7 @@
     // Top-level fan-out actions. A standard user only sees themselves so
     // the "all users" button quietly maps to themselves anyway.
     toolbar.innerHTML =
-      '<button data-update-scope="all-all">Update all emulators (all users)</button>' +
+      '<button data-update-scope="all-all">Update all emulators</button>' +
       '<button class="secondary" data-update-scope="all-windows">Update all Windows</button>' +
       '<button class="secondary" data-update-scope="all-linux">Update all Linux</button>';
     $$("#emulators-toolbar button[data-update-scope]").forEach((btn) =>
@@ -526,41 +526,38 @@
       return;
     }
     tree.innerHTML = users
-      .map((u, idx) => {
+      .map((u) => {
         const targets = u.targets || {};
         return (
-          '<details class="tile" ' +
+          '<details class="folder emu-folder user-folder" ' +
           (users.length === 1 ? "open" : "") +
-          '><summary><strong>' +
+          '><summary><span class="folder-name">' +
           escapeHtml(u.email) +
-          "</strong></summary>" +
-          '<div class="row mt">' +
-          '<button data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="all">Update all emulators for this user</button>' +
-          '<button class="secondary" data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="windows">All Windows</button>' +
-          '<button class="secondary" data-update-user="' +
-          escapeHtml(u.email) +
-          '" data-os="linux">All Linux</button>' +
-          "</div>" +
-          '<div class="tile-grid mt">' +
+          '</span><small class="muted">User</small></summary>' +
+          '<div class="folder-children">' +
           ["windows", "linux"]
             .map((os) => {
               return (
-                '<div class="tile"><h4>' +
+                '<details class="folder emu-folder os-folder"><summary><span class="folder-name">' +
                 escapeHtml(os) +
-                "</h4>" +
+                '</span><small class="muted">OS</small></summary>' +
+                '<div class="folder-actions"><button class="secondary" data-update-user="' +
+                escapeHtml(u.email) +
+                '" data-os="' +
+                escapeHtml(os) +
+                '">Update all ' +
+                escapeHtml(os) +
+                " emulators for this user</button></div>" +
+                '<div class="folder-children emulator-list">' +
                 emulators
                   .map((emu) => {
                     const t = (targets[emu.id] && targets[emu.id][os]) || null;
                     return (
-                      "<div>" +
+                      '<div class="emulator-row"><div><strong>' +
                       escapeHtml(emu.name) +
-                      ' <small class="muted">' +
+                      '</strong><small class="muted">' +
                       (t ? "v" + escapeHtml(t.version) + " — " + timeAgo(t.applied_at) : "never updated") +
-                      "</small> " +
+                      "</small></div>" +
                       '<button class="secondary" data-update-one="' +
                       escapeHtml(u.email) +
                       '" data-emu="' +
@@ -571,7 +568,7 @@
                     );
                   })
                   .join("") +
-                "</div>"
+                "</div></details>"
               );
             })
             .join("") +
