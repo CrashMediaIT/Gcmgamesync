@@ -553,7 +553,7 @@
                   .map((emu) => {
                     const t = (targets[emu.id] && targets[emu.id][os]) || null;
                     return (
-                      '<div class="emulator-row"><div><strong>' +
+                      '<div class="emulator-row"><div class="emulator-info"><strong>' +
                       escapeHtml(emu.name) +
                       '</strong><small class="muted">' +
                       (t ? "v" + escapeHtml(t.version) + " — " + timeAgo(t.applied_at) : "never updated") +

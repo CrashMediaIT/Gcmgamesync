@@ -2787,6 +2787,7 @@ body:not(.is-group-admin):not(.is-admin) .group-admin-only { display: none !impo
 .folder-actions { border-top: 1px solid var(--border); padding: 0 14px 12px 28px; background: rgba(0,0,0,.12); }
 .emulator-list { display: grid; gap: 8px; }
 .emulator-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.035); }
+.emulator-info { min-width: 0; }
 .emulator-row small { display: block; margin-top: 3px; }
 .saves-user-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
 .save-user-card { cursor: pointer; min-height: 116px; display: flex; flex-direction: column; justify-content: space-between; }
